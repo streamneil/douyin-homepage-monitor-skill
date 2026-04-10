@@ -1,0 +1,11 @@
+{
+  "name": "douyin-homepage-monitor",
+  "version": "2.0.0",
+  "description": "监控抖音用户主页，检测新视频发布和主页信息变更，通过 OpenClaw channels 发送通知（含视频文件）",
+  "author": {
+    "name": "douyin-homepage-monitor"
+  },
+  "keywords": ["douyin", "tiktok", "monitor", "notification", "video"],
+  "commands": ["./commands"],
+  "skills": ["./skills"]
+}

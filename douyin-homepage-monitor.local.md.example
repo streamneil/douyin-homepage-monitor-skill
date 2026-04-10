@@ -1,0 +1,28 @@
+---
+enabled: true
+save_dir: ./Download
+cron: "*/5 * * * *"
+targets:
+  - label: "刘德华"
+    url: "https://v.douyin.com/xxxxx"
+  - label: "周杰伦"
+    url: "https://v.douyin.com/yyyyy"
+---
+
+# 抖音主页监控配置
+
+每 5 分钟检查一次以上用户的抖音主页。
+有新视频时通过 channels 发送通知，包含封面图和视频文件。
+主页信息变更（昵称/签名/IP归属）也会即时通知。
+
+## 使用说明
+
+- 将此文件复制到项目的 .claude/ 目录下，命名为 douyin-homepage-monitor.local.md
+- 修改 targets 中的 label 和 url
+- 修改 cron 设置监控频率（默认每5分钟）
+- 修改 save_dir 设置视频保存路径
+
+## 注意事项
+
+- 此文件应加入 .gitignore，避免提交到代码仓库
+- 修改配置后需重启 Claude Code 使 hooks 生效

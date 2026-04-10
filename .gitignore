@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+.venv
+env/
+venv/
+ENV/
+
+# macOS
+.DS_Store
+
+# 运行时生成的历史记录文件
+*.history
+
+# 下载的视频（体积大，不提交）
+Download/
+
+# 用户本地配置（含隐私信息，不提交）
+.claude/*.local.md
+.claude/*.local.json
+
+# 打包产物（由 CI/本地重新生成）
+*.skill
+skill-build/
+
+# 日志
+*.log
