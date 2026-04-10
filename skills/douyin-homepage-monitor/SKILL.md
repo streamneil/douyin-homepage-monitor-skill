@@ -94,22 +94,6 @@ python3 scripts/monitor.py --init '{"save_dir":"{PLUGIN_DIR}/Download","targets"
 
 ### 第 5 步：处理 init_complete 事件
 
-#### 事件：`error`（code: cookie_invalid）
-
-```
-⚠️  Cookie 未配置或已失效！
-
-未登录状态下抖音 API 只返回约 10 条数据，无法获取完整作品列表。
-
-更新步骤：
-1. 浏览器打开 https://www.douyin.com 并登录
-2. F12 → Network → 刷新页面 → 任意请求 → Request Headers → 复制 cookie 值
-3. 编辑 {PLUGIN_DIR}/scripts/monitor.py，将 COOKIE 变量（约第 25 行）替换
-4. 重新运行：帮我监控 {label} {url}
-```
-
-仍继续处理后续事件。
-
 #### 事件：`init_complete`
 
 展示摘要，**不自动下载，不自动发送视频**：
@@ -132,12 +116,11 @@ python3 scripts/monitor.py --init '{"save_dir":"{PLUGIN_DIR}/Download","targets"
 💡 如需查看某条视频，告诉我"下载第N条"即可。
 ```
 
-若 `login_warning: true`，末尾追加 Cookie 提示。
-
 ### 第 6 步：首次配置时提示依赖
 
 ```
-提示：如未安装依赖，请运行：pip install requests tqdm
+提示：如未安装依赖，请运行：
+pip install requests aiohttp pyyaml gmssl tqdm
 ```
 
 ### 第 7 步：创建定时任务（直接创建，不询问）
@@ -271,6 +254,7 @@ python3 scripts/monitor.py '{
   "title": "视频标题",
   "create_time": "2024-05-10 20:00:00",
   "cover_url": "https://...",
+  "digg_count": 0,
   "file_path": "/path/to/Download/昵称/[2024-05-10] 视频标题.mp4"
 }
 ```
@@ -286,7 +270,19 @@ python3 scripts/monitor.py '{
 
 发送纯文字：`{message}`
 
+#### 事件：`monitor_summary`
+
+每个 target 处理完毕后均会发出此事件（无论是否有新视频）：
+
+```json
+{"type": "monitor_summary", "label": "WP", "nickname": "实际昵称", "new_count": 0}
+```
+
+**用此事件汇总摘要**，不要依赖 stderr 输出。
+
 ### 第 4 步：输出摘要
+
+收集所有 `monitor_summary` 事件后输出：
 
 ```
 检测完成（{datetime}）：
@@ -299,14 +295,15 @@ python3 scripts/monitor.py '{
 
 ## 注意事项
 
-- **按需下载**：始终通过 `python3 scripts/monitor.py --download` 下载，**绝不使用浏览器工具或 yt-dlp**，脚本直接用带 Cookie 的 HTTP 请求拉取 CDN 直链
-- **Cookie 是一切的前提**：抖音 API 自 2024 年底起要求完整登录态 Cookie，否则 API 返回 200 但 body 为空。若 API 返回空数据，第一步永远是更新 Cookie
-- **诊断命令**：若怀疑 Cookie 失效，先运行：
+- **按需下载**：始终通过 `python3 scripts/monitor.py --download` 下载，**绝不使用浏览器工具或 yt-dlp**，脚本使用 DouyinAPIClient（基于 jiji262/douyin-downloader）实时获取下载链接
+- **下载链接实时刷新**：脚本使用 `aweme_id` 实时调用 `get_video_detail` API 获取最新下载链接，**解决了 CDN 链接过期问题**，无需重新初始化
+- **Cookie 无需登录**：参考 jiji262/douyin-downloader 策略，使用设备标识 Cookie（ttwid、odin_tt 等）即可，不需要 sessionid/uid_tt 等登录态字段。ttwid 和 msToken 在运行时自动获取，`COOKIE` 变量留空也可正常运行
+- **诊断命令**：若 API 返回数据为空，先运行：
   ```bash
   cd {PLUGIN_DIR}
   python3 scripts/monitor.py --check '{"home_url":"https://v.douyin.com/xxx"}'
   ```
-  输出 `check_api.message` 为 ✅ 才说明 Cookie 有效
+  输出 `check_api.success: true` 才说明 API 正常
 - 多博主：每个博主的 history/catalog 文件均以其 URL 的 md5 命名，互不干扰；执行模式必须传入所有 targets
 - 历史文件（`*.history`）和目录缓存（`*.json`）存储在 plugin 目录下，不要删除
-- `--init` 后 catalog 已缓存视频 URL，但抖音 CDN 链接有效期约数小时；若下载时报 URL 过期，重新 `--init` 即可刷新
+- **签名算法**：使用 XBogus 签名（来自 jiji262/douyin-downloader），与抖音官方算法对齐，稳定性更高

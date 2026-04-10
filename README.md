@@ -28,16 +28,18 @@
 ```
 
 Skill 会自动识别意图：
-- 消息中包含抖音链接 → **配置模式**：自动提取链接（忽略分享文案中的无关内容）、追加监控目标、**立即全量抓取并下载所有历史视频**、创建定时任务
+- 消息中包含抖音链接 → **配置模式**：自动提取链接（忽略分享文案中的无关内容）、追加监控目标、全量抓取视频目录（不自动下载历史视频）、创建定时任务
 - 要求立即检测 → **执行模式**：增量检测并发送通知
 
 **首次添加监控目标时的行为：**
 
-1. 全量抓取该用户所有历史视频并下载到本地（`plugin目录/Download/用户昵称/`）
-2. 写入历史记录（后续只通知新发布的内容，不重复下载）
-3. 展示作品摘要（作品数量多时只展示最近 5 条）
+1. 全量抓取该用户所有历史视频的元数据，缓存到本地目录（不自动下载视频文件）
+2. 写入历史记录（后续只通知新发布的内容，不重复处理）
+3. 展示作品摘要（最近 10 条）
 4. 告知监控频率：`我将每 5 分钟第一时间通知你 XX 的新动态`
 5. 自动创建定时任务
+
+> 历史视频不会自动下载。需要某条历史视频时，说"下载第N条"即可按需获取。
 
 **未指定频率时默认 5 分钟检测一次，最低 2 分钟。**
 
@@ -103,22 +105,24 @@ Skill 会自动识别意图：
 2. 设置监控频率（推荐 5~30 分钟）
 3. 设置视频保存路径（默认 `./Download`）
 
-### 配置 Cookie（必须）
+### 配置 Cookie（可选）
 
-> Cookie 是获取完整数据的关键。**未登录状态下，抖音 API 只返回第一页约 10 条数据**，这不是懒加载问题，而是接口限制。
+参考 [jiji262/douyin-downloader](https://github.com/jiji262/douyin-downloader) 的策略，使用设备标识 Cookie 即可，**无需登录**。`ttwid` 和 `msToken` 会在运行时自动动态获取，`COOKIE` 变量留空也可正常运行。
 
-1. 在浏览器打开 [https://www.douyin.com](https://www.douyin.com) 并登录
+如需补充设备 Cookie 以提高稳定性（可选）：
+
+1. 在浏览器打开 [https://www.douyin.com](https://www.douyin.com)（无需登录）
 2. 按 `F12` → Network 标签 → 刷新页面
 3. 点击任意请求 → Request Headers → 找到 `cookie` 字段
-4. 复制完整的 cookie 值（是很长的一串字符串）
+4. 复制 cookie 值（脚本会自动过滤掉登录态字段，只保留设备标识字段）
 5. 编辑插件目录下的 `scripts/monitor.py`，将 `COOKIE` 变量（约第 25 行）替换为复制的值
 
-Cookie 失效后（通常数月），脚本会输出 `cookie_invalid` 错误提示，届时重复上述步骤更新即可。
+> 注意：请勿将 `sessionid`、`uid_tt` 等登录态字段填入，这些字段不被使用。
 
 ### 安装 Python 依赖
 
 ```bash
-pip install requests retrying tqdm
+pip install requests aiohttp pyyaml gmssl tqdm
 ```
 
 ## 配置文件
@@ -158,5 +162,18 @@ targets:
 ## 依赖
 
 - Python 3.8+
-- `requests`、`retrying`、`tqdm`
+- `requests`、`aiohttp`、`pyyaml`、`gmssl`、`tqdm`
 - OpenClaw（含 `/schedule` skill）
+
+## 技术架构
+
+本插件使用 [jiji262/douyin-downloader](https://github.com/jiji262/douyin-downloader) 的核心模块：
+
+- **XBogus 签名**：完整的 URL 签名算法，与抖音官方对齐
+- **MsTokenManager**：支持真实 msToken 生成和伪造回退
+- **DouyinAPIClient**：抖音 Web API 客户端，支持用户信息、视频列表、视频详情等接口
+
+**核心优势**：
+- 使用 `aweme_id` 实时获取视频下载链接，**解决 CDN 链接过期问题**
+- 签名算法稳定，与抖音 API 兼容性高
+- 无需 ffmpeg 合合音视频，直接获取单文件直链

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-抖音主页监控脚本
+抖音主页监控脚本（重构版）
+- 使用 jiji262/douyin-downloader 的核心模块进行 API 调用和签名
 - 检测新视频，下载到 ./Download/<用户名>/ 并输出 JSON 通知
 - 检测用户昵称/签名/IP归属变化，输出 JSON 通知
 - 结果以 JSON Lines 格式输出到 stdout，每行一个通知事件
@@ -20,29 +21,44 @@
 
   # 按需下载指定 aweme_id 的视频
   python monitor.py --download '{"save_dir":"./Download","label":"xx","home_url":"https://v.douyin.com/xxx","aweme_ids":["7123456789"]}'
+
+  # API 检测（诊断 Cookie 是否有效）
+  python monitor.py --check '{"home_url":"https://v.douyin.com/xxx"}'
 """
 
-import re, requests, json, sys, os, time, hashlib, base64, random, string
+import json
+import os
+import re
+import sys
+import time
+import hashlib
 from contextlib import closing
+from typing import Dict, List, Optional, Tuple, Any
+
+import requests
+
+# 导入核心库模块
+from lib import DouyinAPIClient, sanitize_cookies, parse_cookie_header
 
 # ── 常量 ──────────────────────────────────────────────────────────────────────
 
-UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36"
+# Cookie 配置（可选）：
+# 无需登录即可使用。参考 jiji262/douyin-downloader 的策略，使用设备标识 Cookie 即可：
+#   ttwid、odin_tt、s_v_web_id、__ac_nonce 等（浏览器 F12 → Network → cookie 字段）
+# 注意：请勿填入登录态字段（sessionid、uid_tt 等），这些字段不被使用且无必要。
+# ttwid 和 msToken 会在运行时自动动态获取，此处留空也可正常运行。
+COOKIE = ""
 
-# ⚠️  重要：抖音 API 自 2024 年底起要求有效的登录态 Cookie 才能返回数据。
-# 请将以下 COOKIE 替换为从浏览器抖音网页版复制的最新值：
-#   打开 https://www.douyin.com → 登录账号 → F12 → Network → 任意请求 → Request Headers → 复制 cookie 字段
-# Cookie 有效期约数月，过期后 API 返回 200 但 body 为空（无法获取视频列表）。
-COOKIE = "douyin.com; device_web_cpu_core=8; device_web_memory_size=8; csrf_session_id=14825116dc9c2fcd63d4632119bc532c; FORCE_LOGIN=%7B%22videoConsumedRemainSeconds%22%3A180%7D; xgplayer_user_id=571413576421; xg_device_score=6.792332233647336; passport_csrf_token=7e267631ddc818b02128b8c7e08f294a; passport_csrf_token_default=7e267631ddc818b02128b8c7e08f294a; bd_ticket_guard_client_web_domain=2; SEARCH_RESULT_LIST_TYPE=%22single%22; download_guide=%223%2F20240507%2F0%22; volume_info=%7B%22isUserMute%22%3Afalse%2C%22isMute%22%3Atrue%2C%22volume%22%3A0.5%7D; pwa2=%220%7C0%7C3%7C0%22; ttwid=1%7Ctszc2J_dOM7jx_4PCBZRSCJxUKi5I4i2Nr9wbDnFcug%7C1715154044%7C88fcb9e48adcf9bde355bf1fee18944e5a1021d415d465734b31a82e20fb91dc; xgplayer_device_id=35940013617; d_ticket=67d954e5df833256ebcd2fc59d5aff4154e38; odin_tt=4f6cc09deb42a3125cf0dea9783bcaf20c4ca064978825d6d42c3dcad395581749e266990b98b09807cc83e935c25f86e3611fe01e62685c3d16883d4d22be3f; passport_assist_user=CkEuJUi8ALBdSpvLAsYaK9YrnGMEwuvMzRpFuHlfHatDzvm8cWky2du-OWo801eRNNCqgsAI1uiSzxIOekE11f0AUBpKCjzJ7QgCPIOp8i11d5cdpE1jYDbjQOZ5azOqKML28BtPcARRQnH37tRD3tBYdTj3YuauEHGz4XSXeR1BpSUQkvbQDRiJr9ZUIAEiAQPnNCmn; n_mh=_QbRJA7TRnnvOnh2XfgXThpiklCKGc1RCDDX8HAsJjU; passport_auth_status=dc33df43ccce4674112c996ad1f3359a%2C941150a1c20a7bd3548cefab4d816c89; passport_auth_status_ss=dc33df43ccce4674112c996ad1f3359a%2C941150a1c20a7bd3548cefab4d816c89; sid_guard=d2a76c9db9e8d914fda02be1e608d287%7C1715336743%7C5184000%7CTue%2C+09-Jul-2024+10%3A25%3A43+GMT; uid_tt=8f6f72b1323ae8dec49d595d16657b68; uid_tt_ss=8f6f72b1323ae8dec49d595d16657b68; sid_tt=d2a76c9db9e8d914fda02be1e608d287; sessionid=d2a76c9db9e8d914fda02be1e608d287; sessionid_ss=d2a76c9db9e8d914fda02be1e608d287; msToken=gKn58dVmX7RgljlSJ6HJ94Y4zIrSzLuTQg17b4GtTj1HGkJdtLO2ED2_Qf2YY93Ie_y2SM1LSrHez8i9PO2XPGpxwLUJyTnRtxMq4f8Ekx2kv53K6XLRIQdmdDmLcNE=; IsDouyinActive=true"
+# 运行时不使用的登录态字段（与 jiji262/douyin-downloader 保持一致）
+_LOGIN_FIELDS = frozenset({
+    'sessionid', 'sessionid_ss', 'sid_tt', 'sid_guard',
+    'uid_tt', 'uid_tt_ss', 'passport_auth_status', 'passport_auth_status_ss',
+    'passport_assist_user', 'passport_auth_mix_state', 'passport_mfa_token', 'login_time',
+})
 
-# ── Cookie 动态补全 ────────────────────────────────────────────────────────────
+# ── Cookie 构建 ────────────────────────────────────────────────────────────────
 
-def _gen_mstoken(length=107):
-    """生成随机 msToken"""
-    chars = string.ascii_letters + string.digits + '='
-    return ''.join(random.choices(chars, k=length))
-
-def _fetch_ttwid():
+def _fetch_ttwid() -> str:
     """动态获取 ttwid（无需登录）"""
     try:
         url = 'https://ttwid.bytedance.com/ttwid/union/register/'
@@ -55,155 +71,75 @@ def _fetch_ttwid():
         pass
     return ''
 
-def _build_runtime_auth():
+def _build_runtime_cookies() -> Dict[str, str]:
     """
-    构建运行时 Cookie 和 msToken。
-    - 若 COOKIE 包含有效登录态（sessionid 非默认过期值），直接使用
-    - 否则动态获取 ttwid + 随机 msToken（API 仍可能返回空，需用户更新 Cookie）
-    返回 (cookie_str, mstoken_str)
+    构建运行时 Cookie（无需登录）。
+    策略（参考 jiji262/douyin-downloader）：
+    1. 从 COOKIE 中提取设备标识字段，过滤掉登录态字段
+    2. 动态获取真实 ttwid 并覆盖（字节跳动官方接口，无需登录）
+    3. msToken 由 MsTokenManager 在首次请求时自动注入
     """
-    # 检测是否为已知过期的默认 Cookie（时间戳 1715154044 = 2024-05-08）
-    is_stale = '1715154044' in COOKIE
+    # 从用户配置的 Cookie 中提取设备字段，屏蔽登录态字段
+    cookies: Dict[str, str] = {
+        k: v for k, v in parse_cookie_header(COOKIE).items()
+        if k not in _LOGIN_FIELDS
+    } if COOKIE else {}
 
-    if is_stale:
-        ttwid = _fetch_ttwid()
-        mstoken = _gen_mstoken()
-        cookie = f'ttwid={ttwid}; msToken={mstoken}' if ttwid else f'msToken={mstoken}'
-        sys.stderr.write('[auth] 检测到默认过期 Cookie，已动态获取 ttwid\n')
-        sys.stderr.write('[auth] ⚠️  抖音 API 现要求完整登录 Cookie，请更新 COOKIE 变量\n')
+    # 基础设备标识
+    cookies.setdefault('device_web_cpu_core', '8')
+    cookies.setdefault('device_web_memory_size', '8')
+    cookies.setdefault('odin_tt', '')
+
+    # 动态获取 ttwid 并覆盖（保证新鲜度）
+    ttwid = _fetch_ttwid()
+    if ttwid:
+        sys.stderr.write(f'[auth] ttwid 获取成功: {ttwid[:20]}...\n')
+        cookies['ttwid'] = ttwid
     else:
-        cookie = COOKIE
-        mstoken_m = re.search(r'msToken=([^;]+)', COOKIE)
-        mstoken = mstoken_m.group(1).strip() if mstoken_m else _gen_mstoken()
-        sys.stderr.write('[auth] 使用配置的完整 Cookie\n')
+        sys.stderr.write('[auth] ttwid 获取失败，将使用 Cookie 中的旧值\n')
 
-    return cookie, mstoken
+    return sanitize_cookies(cookies)
 
-_RUNTIME_COOKIE, _RUNTIME_MSTOKEN = _build_runtime_auth()
+# ── API 客户端 ──────────────────────────────────────────────────────────────────
 
-DEFAULT_PAYLOAD_SUFFIX = (
-    "device_platform=webapp&aid=6383&channel=channel_pc_web"
-    "&publish_video_strategy_type=2&source=channel_pc_web"
-    "&personal_center_strategy=1&update_version_code=170400"
-    "&pc_client_type=1&version_code=170400&version_name=17.4.0"
-    "&cookie_enabled=true&screen_width=853&screen_height=1280"
-    "&browser_language=en&browser_platform=MacIntel&browser_name=Chrome"
-    "&browser_version=120.0.0.0&browser_online=true&engine_name=Blink"
-    "&engine_version=120.0.0.0&os_name=Windows&os_version=10"
-    "&cpu_core_num=8&device_memory=8&platform=PC&downlink=1.25"
-    f"&effective_type=3g&round_trip_time=250&webid=7363610890434774591"
-    f"&msToken={_RUNTIME_MSTOKEN}"
-)
+_API_CLIENT: Optional[DouyinAPIClient] = None
 
-DEFAULT_HEADER = {
-    'User-Agent': UA,
-    'referer': 'https://www.douyin.com/',
-    'Cookie': _RUNTIME_COOKIE,
-}
-
-USER_POST_URL    = 'https://www.douyin.com/aweme/v1/web/aweme/post/?'
-USER_PROFILE_URL = 'https://www.douyin.com/aweme/v1/web/user/profile/other/?'
-
-# ── X-Bogus 签名 ───────────────────────────────────────────────────────────────
-
-def _rc4(key_arr, data_str):
-    d = list(range(256))
-    c = 0
-    result = bytearray(len(data_str))
-    for i in range(256):
-        c = (c + d[i] + ord(key_arr[i % len(key_arr)])) % 256
-        d[i], d[c] = d[c], d[i]
-    t = c = 0
-    for i in range(len(data_str)):
-        t = (t + 1) % 256
-        c = (c + d[t]) % 256
-        d[t], d[c] = d[c], d[t]
-        result[i] = ord(data_str[i]) ^ d[(d[t] + d[c]) % 256]
-    return result
-
-def _get_arr2(payload, ua):
-    md5 = lambda b: hashlib.md5(b).digest()
-    salt_payload = list(md5(md5(payload.encode())))
-    salt_form    = list(md5(md5(b'')))
-    ua_key = ['\x00', '\x01', '\x0e']
-    salt_ua = list(md5(base64.b64encode(_rc4(ua_key, ua))))
-    ts = int(time.time())
-    canvas = 1489154074
-    arr1 = [
-        64, 0, 1, 14,
-        salt_payload[14], salt_payload[15],
-        salt_form[14],    salt_form[15],
-        salt_ua[14],      salt_ua[15],
-        (ts >> 24) & 255, (ts >> 16) & 255, (ts >> 8) & 255, ts & 255,
-        (canvas >> 24) & 255, (canvas >> 16) & 255, (canvas >> 8) & 255, canvas & 255,
-        64,
-    ]
-    for i in range(1, 18):
-        arr1[18] ^= arr1[i]
-    return [arr1[0],arr1[2],arr1[4],arr1[6],arr1[8],arr1[10],arr1[12],arr1[14],arr1[16],arr1[18],
-            arr1[1],arr1[3],arr1[5],arr1[7],arr1[9],arr1[11],arr1[13],arr1[15],arr1[17]]
-
-def _get_xbogus(payload):
-    short = "Dkdpgh4ZKsQB80/Mfvw36XI1R25-WUAlEi7NLboqYTOPuzmFjJnryx9HVGcaStCe="
-    arr2  = _get_arr2(payload, UA)
-    tmp   = _rc4(['ÿ'], "".join(chr(i) for i in [2, 255] + arr2))
-    garbled = [2, 255] + list(tmp)
-    xb = ""
-    for i in range(0, 21, 3):
-        n = garbled[i] << 16 | garbled[i+1] << 8 | garbled[i+2]
-        xb += short[(n>>18)&63] + short[(n>>12)&63] + short[(n>>6)&63] + short[n&63]
-    return xb
-
-def signed_url(base_url, payload):
-    xb = _get_xbogus(payload)
-    return base_url + payload + "&X-Bogus=" + xb
-
-# ── HTTP 工具 ──────────────────────────────────────────────────────────────────
-
-def get(url, timeout=15):
-    r = requests.get(url, headers=DEFAULT_HEADER, timeout=timeout)
-    r.raise_for_status()
-    return r
-
-# ── Cookie 有效性检测 ──────────────────────────────────────────────────────────
-
-def check_login_status():
-    session_match = re.search(r'sessionid=([^;]+)', COOKIE)
-    uid_match     = re.search(r'uid_tt=([^;]+)', COOKIE)
-    session_id = session_match.group(1).strip() if session_match else ''
-    uid_tt     = uid_match.group(1).strip()     if uid_match     else ''
-    is_logged_in = bool(session_id and len(session_id) >= 20 and uid_tt)
-    return is_logged_in, uid_tt
+def get_api_client() -> DouyinAPIClient:
+    """获取 API 客户端（单例，延迟初始化）"""
+    global _API_CLIENT
+    if _API_CLIENT is None:
+        _API_CLIENT = DouyinAPIClient(cookies=_build_runtime_cookies())
+    return _API_CLIENT
 
 # ── 文件存储 ───────────────────────────────────────────────────────────────────
 
-def _url_md5(url):
+def _url_md5(url: str) -> str:
     return hashlib.md5(url.encode()).hexdigest()
 
-def _aweme_file(home_url):
+def _aweme_file(home_url: str) -> str:
     return _url_md5(home_url) + '-aweme.history'
 
-def _profile_file(home_url):
+def _profile_file(home_url: str) -> str:
     return _url_md5(home_url) + '-userprofile.history'
 
-def _catalog_file(home_url):
+def _catalog_file(home_url: str) -> str:
     """视频目录缓存文件，存储全量视频列表（含下载 URL），供按需下载使用"""
     return _url_md5(home_url) + '-catalog.json'
 
-def load_history(home_url):
+def load_history(home_url: str) -> set:
     path = _aweme_file(home_url)
     if not os.path.exists(path):
         return set()
     with open(path, 'r', encoding='utf-8') as f:
         return set(line.strip() for line in f if line.strip())
 
-def save_history(home_url, aweme_id):
+def save_history(home_url: str, aweme_id: str):
     with open(_aweme_file(home_url), 'a', encoding='utf-8') as f:
         f.write(aweme_id.strip() + '\n')
 
-def load_profile(home_url):
+def load_profile(home_url: str) -> Dict[str, str]:
     path = _profile_file(home_url)
-    result = {'nickname': '', 'signature': '', 'ip_location': ''}
+    result = {'nickname': '', 'signature': '', 'ip_location': '', 'sec_uid': ''}
     if not os.path.exists(path):
         return result
     try:
@@ -218,18 +154,31 @@ def load_profile(home_url):
         pass
     return result
 
-def save_profile(home_url, nickname, signature, ip_location):
+def save_profile(home_url: str, nickname: str, signature: str, ip_location: str, sec_uid: str = ''):
     path = _profile_file(home_url)
     with open(path, 'w', encoding='utf-8') as f:
-        f.write(f'nickname:{nickname}\nsignature:{signature}\nip_location:{ip_location}\n')
+        f.write(f'nickname:{nickname}\nsignature:{signature}\nip_location:{ip_location}\nsec_uid:{sec_uid}\n')
 
-def save_catalog(home_url, video_list):
-    """保存视频目录（含下载 URL）到本地缓存，供按需下载使用"""
+def save_catalog(home_url: str, video_list: List[Dict[str, Any]]):
+    """保存视频目录（含 aweme_id）到本地缓存，供按需下载使用"""
     path = _catalog_file(home_url)
+    # 只保存必要字段，不保存 video_url（因为会过期）
+    catalog_data = [
+        {
+            'aweme_id': v['aweme_id'],
+            'title': v.get('title', ''),
+            'desc': v.get('desc', ''),
+            'create_time': v.get('create_time', ''),
+            'date': v.get('date', ''),
+            'digg_count': v.get('digg_count', 0),
+            'cover_url': v.get('cover_url', ''),
+        }
+        for v in video_list
+    ]
     with open(path, 'w', encoding='utf-8') as f:
-        json.dump(video_list, f, ensure_ascii=False, indent=2)
+        json.dump(catalog_data, f, ensure_ascii=False, indent=2)
 
-def load_catalog(home_url):
+def load_catalog(home_url: str) -> List[Dict[str, Any]]:
     """读取本地视频目录缓存，返回列表（从新到旧）；不存在则返回 []"""
     path = _catalog_file(home_url)
     if not os.path.exists(path):
@@ -242,31 +191,40 @@ def load_catalog(home_url):
 
 # ── 抖音 API ───────────────────────────────────────────────────────────────────
 
-def get_sec_uid(home_url):
-    """从短链/主页 URL 获取 sec_uid"""
-    r = get(home_url)
-    m = re.search(r'sec_uid=([^&]+)', r.url)
-    if not m:
-        raise ValueError(f"无法从重定向 URL 解析 sec_uid: {r.url}")
-    return m.group(1)
+def get_sec_uid(home_url: str) -> str:
+    """从短链/主页 URL 获取 sec_uid（先读缓存，否则发起 HTTP 解析）"""
+    # 读取缓存
+    cached = load_profile(home_url).get('sec_uid', '')
+    if cached:
+        return cached
 
-def get_user_profile(sec_uid):
-    payload = f'sec_user_id={sec_uid}&{DEFAULT_PAYLOAD_SUFFIX}'
-    url = signed_url(USER_PROFILE_URL, payload)
-    r = get(url)
-    data = r.json()
-    user = data['user']
-    return user['nickname'], user.get('signature', ''), user.get('ip_location', '')
+    client = get_api_client()
+    sec_uid = client.get_sec_uid_from_url(home_url)
+    if not sec_uid:
+        raise ValueError(f"无法从 URL 解析 sec_uid: {home_url}")
+    return sec_uid
 
-def fetch_video_page(sec_uid, max_cursor):
-    payload = f'sec_user_id={sec_uid}&max_cursor={max_cursor}&count=18&{DEFAULT_PAYLOAD_SUFFIX}'
-    url = signed_url(USER_POST_URL, payload)
-    r = get(url)
-    data = r.json()
-    aweme_list = data.get('aweme_list') or []
-    return aweme_list, data.get('max_cursor', 0), bool(data.get('has_more', 0))
+def get_user_profile(sec_uid: str) -> Tuple[str, str, str]:
+    """获取用户资料"""
+    client = get_api_client()
+    user = client.get_user_info(sec_uid)
+    if not user:
+        raise ValueError(f"无法获取用户信息: {sec_uid}")
+    nickname = user.get('nickname', '')
+    signature = user.get('signature', '')
+    ip_location = user.get('ip_location', '')
+    return nickname, signature, ip_location
 
-def fetch_all_videos(sec_uid):
+def fetch_video_page(sec_uid: str, max_cursor: int = 0) -> Tuple[List[Dict], int, bool]:
+    """获取一页视频列表"""
+    client = get_api_client()
+    result = client.get_user_post(sec_uid, max_cursor=max_cursor, count=20)
+    items = result.get('aweme_list') or []
+    next_cursor = result.get('max_cursor', 0)
+    has_more = result.get('has_more', False)
+    return items, next_cursor, has_more
+
+def fetch_all_videos(sec_uid: str) -> List[Dict[str, Any]]:
     """翻页获取全部视频，返回所有 aweme item 列表（原始 API 数据）"""
     all_items = []
     max_cursor = 0
@@ -292,53 +250,75 @@ def fetch_all_videos(sec_uid):
 
     return all_items
 
-def parse_video(item):
+def parse_video(item: Dict[str, Any]) -> Dict[str, Any]:
     """从 aweme item 提取关键字段"""
-    ts = item['create_time']
-    dt = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts))
-    date_prefix = time.strftime('%Y-%m-%d', time.localtime(ts))
+    ts = item.get('create_time', 0)
+    dt = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts)) if ts else ''
+    date_prefix = time.strftime('%Y-%m-%d', time.localtime(ts)) if ts else ''
     raw_desc = item.get('desc', '') or ''
     safe_desc = re.sub(r'[\\/:*?"<>|]', '', raw_desc) or '无标题'
-    # 文件名格式：[日期] 标题
+    
     title = f'[{date_prefix}] {safe_desc}'
-    # 优先选非 v26-web.douyinvod.com 的 CDN，同时过滤 watermark URL
-    urls = item['video']['play_addr']['url_list']
-    video_url = next((u for u in urls if 'v26-web.douyinvod.com' not in u), urls[0])
-    cover_url = item['video']['cover']['url_list'][0]
+    
+    # 提取封面 URL
+    cover_url = ''
+    cover = item.get('video', {}).get('cover', {})
+    cover_urls = cover.get('url_list') or []
+    if cover_urls:
+        cover_url = cover_urls[0]
+    
+    # 提取点赞数
     stats = item.get('statistics') or {}
     digg_count = stats.get('digg_count', 0)
+    
     return {
-        'aweme_id':    item['aweme_id'],
-        'title':       title,
-        'desc':        safe_desc,
+        'aweme_id': item.get('aweme_id', ''),
+        'title': title,
+        'desc': safe_desc,
         'create_time': dt,
-        'date':        date_prefix,
-        'video_url':   video_url,
-        'cover_url':   cover_url,
-        'digg_count':  digg_count,
+        'date': date_prefix,
+        'cover_url': cover_url,
+        'digg_count': digg_count,
     }
 
 # ── 视频下载 ───────────────────────────────────────────────────────────────────
 
-def download_video(video_url, dest_path):
+def get_video_download_url(aweme_id: str) -> Optional[Tuple[str, Dict[str, str]]]:
+    """
+    获取视频下载 URL（实时刷新）
+    
+    通过 get_video_detail 获取最新的 aweme 数据，然后提取下载链接
+    """
+    client = get_api_client()
+    detail = client.get_video_detail(aweme_id)
+    if not detail:
+        return None
+    return client.build_video_download_url(detail)
+
+def download_video(aweme_id: str, dest_path: str) -> str:
     """
     下载视频到 dest_path（不含扩展名），返回实际文件路径。
-    使用抖音 API 签名后的直链 + Cookie，绕过 CDN 防盗链。
-    不依赖 yt-dlp 或 ffmpeg。
+    
+    使用 DouyinAPIClient 获取实时下载链接，绕过 CDN 防盗链。
     """
-    # 部分 URL 使用 aweme.snssdk.com，替换为可访问的域名
-    url = video_url.replace('aweme.snssdk.com', 'api.amemv.com')
     mp4_path = dest_path + '.mp4'
-
-    headers = dict(DEFAULT_HEADER)
-    # 移除 None 值的 header
-    headers = {k: v for k, v in headers.items() if v is not None}
-
-    with closing(requests.get(url, headers=headers, stream=True, timeout=120, allow_redirects=True)) as r:
+    
+    # 获取下载 URL
+    url_headers = get_video_download_url(aweme_id)
+    if not url_headers:
+        raise ValueError(f'无法获取视频下载链接: {aweme_id}')
+    
+    video_url, headers = url_headers
+    sys.stderr.write(f'[download] 获取到下载 URL: {video_url[:80]}...\n')
+    
+    # 下载视频
+    with closing(requests.get(video_url, headers=headers, stream=True, timeout=120, 
+                              allow_redirects=True)) as r:
         r.raise_for_status()
         content_type = r.headers.get('content-type', '')
         if 'text' in content_type or 'html' in content_type:
-            raise ValueError(f'返回内容不是视频（content-type: {content_type}），Cookie 可能已失效')
+            raise ValueError(f'返回内容不是视频（content-type: {content_type}）')
+        
         total = int(r.headers.get('content-length', 0))
         done = 0
         with open(mp4_path, 'wb') as f:
@@ -350,72 +330,58 @@ def download_video(video_url, dest_path):
                         pct = done / total * 100
                         sys.stderr.write(f'\r  下载进度: {pct:.1f}% ({done/1024/1024:.1f}MB)')
         sys.stderr.write('\n')
-
-    # 验证文件大小合理（视频至少应该有 10KB）
+    
+    # 验证文件大小
     file_size = os.path.getsize(mp4_path)
     if file_size < 10240:
         os.remove(mp4_path)
-        raise ValueError(f'下载的文件过小（{file_size} bytes），可能是 Cookie 失效或链接过期')
-
+        raise ValueError(f'下载的文件过小（{file_size} bytes）')
+    
     return mp4_path
 
 # ── 事件输出 ───────────────────────────────────────────────────────────────────
 
-def emit(event: dict):
-    """将事件以 JSON Lines 格式输出到 stdout，供 SKILL.md 中的 Claude 解析"""
+def emit(event: Dict[str, Any]):
+    """将事件以 JSON Lines 格式输出到 stdout"""
     print(json.dumps(event, ensure_ascii=False), flush=True)
 
-# ── 首次初始化模式（只抓列表，不下载） ────────────────────────────────────────
+# ── 首次初始化模式 ───────────────────────────────────────────────────────────────
 
-def init_one(label, home_url, save_dir):
+def init_one(label: str, home_url: str, save_dir: str):
     """
     首次添加监控目标时调用：
-    1. 检测登录态
-    2. 获取用户资料
-    3. 全量抓取所有视频列表（翻页到底）
-    4. 将视频目录（含下载 URL）保存到本地缓存
-    5. 写入历史记录（后续只通知增量新视频）
-    6. 输出 init_complete 事件（不下载视频，等用户按需请求）
+    1. 获取用户资料
+    2. 全量抓取所有视频列表（翻页到底）
+    3. 将视频目录保存到本地缓存，写入历史记录
+    4. 输出 init_complete 事件
     """
     sys.stderr.write(f'[init] 开始初始化: {label} ({home_url})\n')
 
-    # 1. 检测登录态
-    is_logged_in, uid = check_login_status()
-    if not is_logged_in:
-        emit({
-            'type': 'error',
-            'code': 'cookie_invalid',
-            'label': label,
-            'message': (
-                'Cookie 未配置或已失效，未登录状态下抖音 API 只返回部分数据。'
-                '请更新 scripts/monitor.py 中的 COOKIE 变量后重试。'
-            )
-        })
-        sys.stderr.write('[init] 警告：Cookie 可能失效，继续尝试但结果可能不完整\n')
-
-    # 2. 获取 sec_uid
+    # 1. 获取 sec_uid
     try:
         sec_uid = get_sec_uid(home_url)
+        sys.stderr.write(f'[init] sec_uid: {sec_uid}\n')
     except Exception as e:
         emit({'type': 'error', 'code': 'sec_uid_failed', 'label': label, 'message': str(e)})
         return
 
-    # 3. 获取用户资料
+    # 2. 获取用户资料
     try:
         nickname, signature, ip_location = get_user_profile(sec_uid)
+        sys.stderr.write(f'[init] 用户: {nickname} ({ip_location})\n')
     except Exception as e:
         emit({'type': 'error', 'code': 'profile_failed', 'label': label, 'message': str(e)})
         return
 
-    save_profile(home_url, nickname, signature, ip_location)
+    save_profile(home_url, nickname, signature, ip_location, sec_uid)
 
-    # 4. 全量抓取视频列表
+    # 3. 全量抓取视频列表
     sys.stderr.write(f'[init] 开始全量抓取视频列表...\n')
     all_items = fetch_all_videos(sec_uid)
     total_count = len(all_items)
     sys.stderr.write(f'[init] 共获取到 {total_count} 条视频\n')
 
-    # 5. 解析视频列表，写入历史记录，保存目录缓存
+    # 4. 解析视频列表，写入历史记录，保存目录缓存
     user_dir = os.path.join(save_dir, nickname)
     os.makedirs(user_dir, exist_ok=True)
 
@@ -426,36 +392,34 @@ def init_one(label, home_url, save_dir):
         save_history(home_url, v['aweme_id'])
 
     # 按发布时间从新到旧排序
-    video_list.sort(key=lambda x: x['create_time'], reverse=True)
+    video_list.sort(key=lambda x: x.get('create_time', ''), reverse=True)
 
-    # 保存目录缓存（含 video_url，供后续按需下载）
+    # 保存目录缓存（不含 video_url，因为会过期）
     save_catalog(home_url, video_list)
 
-    # 6. 输出 init_complete 事件（不含下载，只有列表信息）
-    # video_list 中去掉 video_url（避免 stdout 输出过长），file_path 留空
+    # 5. 输出 init_complete 事件
     display_list = [
         {
-            'aweme_id':    v['aweme_id'],
-            'title':       v['desc'],
-            'create_time': v['create_time'],
-            'date':        v['date'],
-            'digg_count':  v['digg_count'],
-            'cover_url':   v['cover_url'],
-            'file_path':   '',  # 尚未下载
+            'aweme_id': v['aweme_id'],
+            'title': v.get('desc', ''),
+            'create_time': v.get('create_time', ''),
+            'date': v.get('date', ''),
+            'digg_count': v.get('digg_count', 0),
+            'cover_url': v.get('cover_url', ''),
+            'file_path': '',
         }
         for v in video_list
     ]
 
     emit({
-        'type':          'init_complete',
-        'label':         label,
-        'nickname':      nickname,
-        'signature':     signature,
-        'ip_location':   ip_location,
-        'save_dir':      user_dir,
-        'total_videos':  total_count,
-        'video_list':    display_list,   # 从新到旧，供展示最近 N 条
-        'login_warning': not is_logged_in,
+        'type': 'init_complete',
+        'label': label,
+        'nickname': nickname,
+        'signature': signature,
+        'ip_location': ip_location,
+        'save_dir': user_dir,
+        'total_videos': total_count,
+        'video_list': display_list,
         'message': (
             f'{label}（{nickname}）初始化完成：'
             f'共 {total_count} 条视频已记录，视频目录已缓存。'
@@ -465,12 +429,12 @@ def init_one(label, home_url, save_dir):
 
 # ── 按需下载模式 ───────────────────────────────────────────────────────────────
 
-def download_one(label, home_url, save_dir, indices=None, aweme_ids=None):
+def download_one(label: str, home_url: str, save_dir: str, 
+                 indices: Optional[List[int]] = None, 
+                 aweme_ids: Optional[List[str]] = None):
     """
     按需下载指定视频。
-    - indices: 列表下标（0=最新），从本地目录缓存中查找
-    - aweme_ids: 指定 aweme_id 列表
-    优先使用本地目录缓存（--init 时保存），避免重复请求 API。
+    使用 aweme_id 实时获取下载链接，解决缓存 URL 过期问题。
     """
     sys.stderr.write(f'[download] 开始按需下载: {label}\n')
 
@@ -478,20 +442,19 @@ def download_one(label, home_url, save_dir, indices=None, aweme_ids=None):
     catalog = load_catalog(home_url)
 
     if not catalog:
-        # 缓存不存在，重新从 API 获取（兼容旧版未保存缓存的情况）
+        # 缓存不存在，重新从 API 获取
         sys.stderr.write('[download] 本地缓存不存在，重新从 API 获取视频列表...\n')
         try:
             sec_uid = get_sec_uid(home_url)
             nickname, _, _ = get_user_profile(sec_uid)
             all_items = fetch_all_videos(sec_uid)
             catalog = [parse_video(item) for item in all_items]
-            catalog.sort(key=lambda x: x['create_time'], reverse=True)
+            catalog.sort(key=lambda x: x.get('create_time', ''), reverse=True)
             save_catalog(home_url, catalog)
         except Exception as e:
             emit({'type': 'error', 'code': 'catalog_failed', 'label': label, 'message': str(e)})
             return
     else:
-        # 从缓存读取 nickname
         profile = load_profile(home_url)
         nickname = profile.get('nickname') or label
 
@@ -525,61 +488,57 @@ def download_one(label, home_url, save_dir, indices=None, aweme_ids=None):
     os.makedirs(user_dir, exist_ok=True)
 
     for v in targets:
-        dest = os.path.join(user_dir, v['title'])
+        aweme_id = v['aweme_id']
+        title = v.get('title', v.get('desc', ''))
+        dest = os.path.join(user_dir, title)
         mp4_path = dest + '.mp4'
 
-        # 已存在则直接返回路径，不重复下载
+        # 已存在则跳过
         if os.path.exists(mp4_path) and os.path.getsize(mp4_path) > 10240:
-            sys.stderr.write(f'[download] 已存在，跳过下载: {v["title"]}\n')
+            sys.stderr.write(f'[download] 已存在，跳过: {title}\n')
             emit({
-                'type':        'download_result',
-                'label':       label,
-                'nickname':    nickname,
-                'aweme_id':    v['aweme_id'],
-                'title':       v['desc'],
-                'create_time': v['create_time'],
-                'digg_count':  v['digg_count'],
-                'cover_url':   v['cover_url'],
-                'file_path':   mp4_path,
-                'skipped':     True,
-            })
-            continue
-
-        video_url = v.get('video_url', '')
-        if not video_url:
-            emit({
-                'type': 'error', 'code': 'no_url', 'label': label,
-                'message': f'视频 {v["aweme_id"]} 无下载 URL（缓存可能已过期，请重新初始化）'
+                'type': 'download_result',
+                'label': label,
+                'nickname': nickname,
+                'aweme_id': aweme_id,
+                'title': v.get('desc', ''),
+                'create_time': v.get('create_time', ''),
+                'digg_count': v.get('digg_count', 0),
+                'cover_url': v.get('cover_url', ''),
+                'file_path': mp4_path,
+                'skipped': True,
             })
             continue
 
         try:
-            sys.stderr.write(f'[download] 下载: {v["title"]}\n')
-            file_path = download_video(video_url, dest)
+            sys.stderr.write(f'[download] 下载: {title} (aweme_id: {aweme_id})\n')
+            file_path = download_video(aweme_id, dest)
             emit({
-                'type':        'download_result',
-                'label':       label,
-                'nickname':    nickname,
-                'aweme_id':    v['aweme_id'],
-                'title':       v['desc'],
-                'create_time': v['create_time'],
-                'digg_count':  v['digg_count'],
-                'cover_url':   v['cover_url'],
-                'file_path':   file_path,
-                'skipped':     False,
+                'type': 'download_result',
+                'label': label,
+                'nickname': nickname,
+                'aweme_id': aweme_id,
+                'title': v.get('desc', ''),
+                'create_time': v.get('create_time', ''),
+                'digg_count': v.get('digg_count', 0),
+                'cover_url': v.get('cover_url', ''),
+                'file_path': file_path,
+                'skipped': False,
             })
         except Exception as e:
-            sys.stderr.write(f'[download] 下载失败: {v["title"]} — {e}\n')
+            sys.stderr.write(f'[download] 下载失败: {title} — {e}\n')
             emit({
-                'type': 'error', 'code': 'download_failed', 'label': label,
-                'aweme_id': v['aweme_id'],
-                'title': v['desc'],
+                'type': 'error',
+                'code': 'download_failed',
+                'label': label,
+                'aweme_id': aweme_id,
+                'title': v.get('desc', ''),
                 'message': str(e),
             })
 
 # ── 增量监控模式 ───────────────────────────────────────────────────────────────
 
-def monitor_one(label, home_url, save_dir):
+def monitor_one(label: str, home_url: str, save_dir: str):
     """
     增量监控单个主页，只处理历史记录中没有的新视频，并下载。
     """
@@ -608,13 +567,13 @@ def monitor_one(label, home_url, save_dir):
             changes.append(f'IP归属: {old_profile["ip_location"]} → {ip_location}')
         if changes:
             emit({
-                'type':    'profile_update',
-                'label':   label,
+                'type': 'profile_update',
+                'label': label,
                 'nickname': nickname,
                 'changes': changes,
                 'message': f'{label} 更新了主页信息：' + '；'.join(changes),
             })
-    save_profile(home_url, nickname, signature, ip_location)
+    save_profile(home_url, nickname, signature, ip_location, sec_uid)
 
     history = load_history(home_url)
     max_cursor = 0
@@ -630,171 +589,195 @@ def monitor_one(label, home_url, save_dir):
             sys.stderr.write(f'[monitor] 获取视频页失败: {e}\n')
             break
 
-        page_new = [parse_video(i) for i in items if parse_video(i)['aweme_id'] not in history]
+        parsed = [parse_video(i) for i in items]
+        page_new = [v for v in parsed if v.get('aweme_id') and v['aweme_id'] not in history]
         new_videos.extend(page_new)
 
-        if items and all(parse_video(i)['aweme_id'] in history for i in items):
+        # 整页都是已知视频，说明已到达历史边界
+        if parsed and all(v.get('aweme_id') in history for v in parsed):
             break
 
     if not new_videos:
         sys.stderr.write(f'[monitor] {label}: 无新视频\n')
+        emit({
+            'type': 'monitor_summary',
+            'label': label,
+            'nickname': nickname,
+            'new_count': 0,
+        })
         return
 
     user_dir = os.path.join(save_dir, nickname)
     os.makedirs(user_dir, exist_ok=True)
 
+    downloaded_count = 0
     for v in reversed(new_videos):
-        dest = os.path.join(user_dir, v['title'])
+        aweme_id = v['aweme_id']
+        title = v.get('title', v.get('desc', ''))
+        dest = os.path.join(user_dir, title)
+
         try:
-            sys.stderr.write(f'[monitor] 下载: {v["title"]}\n')
-            file_path = download_video(v['video_url'], dest)
+            sys.stderr.write(f'[monitor] 下载新视频: {title}\n')
+            file_path = download_video(aweme_id, dest)
+            save_history(home_url, aweme_id)
+            downloaded_count += 1
         except Exception as e:
             sys.stderr.write(f'[monitor] 下载失败: {e}\n')
             file_path = ''
 
         emit({
-            'type':        'new_video',
-            'label':       label,
-            'nickname':    nickname,
-            'aweme_id':    v['aweme_id'],
-            'title':       v['desc'],
-            'create_time': v['create_time'],
-            'cover_url':   v['cover_url'],
-            'video_url':   v['video_url'],
-            'file_path':   file_path,
-            'message':     f'{label} 发布了新视频：{v["desc"]}（{v["create_time"]}）',
+            'type': 'new_video',
+            'label': label,
+            'nickname': nickname,
+            'aweme_id': aweme_id,
+            'title': v.get('desc', ''),
+            'create_time': v.get('create_time', ''),
+            'cover_url': v.get('cover_url', ''),
+            'digg_count': v.get('digg_count', 0),
+            'file_path': file_path,
         })
-        save_history(home_url, v['aweme_id'])
 
+    # 将新视频 prepend 到 catalog，保持目录实时更新
+    if downloaded_count > 0:
+        catalog = load_catalog(home_url)
+        known_ids = {v['aweme_id'] for v in catalog}
+        new_entries = [
+            {
+                'aweme_id': v['aweme_id'],
+                'title': v.get('desc', ''),
+                'desc': v.get('desc', ''),
+                'create_time': v.get('create_time', ''),
+                'date': v.get('date', ''),
+                'digg_count': v.get('digg_count', 0),
+                'cover_url': v.get('cover_url', ''),
+            }
+            for v in new_videos if v['aweme_id'] not in known_ids
+        ]
+        if new_entries:
+            save_catalog(home_url, new_entries + catalog)
 
-def cmd_check(home_url):
+    emit({
+        'type': 'monitor_summary',
+        'label': label,
+        'nickname': nickname,
+        'new_count': len(new_videos),
+    })
+
+# ── API 检测模式 ─────────────────────────────────────────────────────────────────
+
+def check_api(home_url: str):
     """
-    --check 诊断模式：测试 Cookie 和 API 是否正常工作。
-    输出 JSON Lines 格式的诊断结果。
+    检测 API 是否正常工作，用于诊断 Cookie 是否有效。
     """
-    print(json.dumps({'type': 'check_start', 'message': '开始诊断...'}, ensure_ascii=False), flush=True)
+    sys.stderr.write(f'[check] 开始检测: {home_url}\n')
 
-    # 1. Cookie 登录态检测
-    is_logged_in, uid = check_login_status()
-    is_stale = '1715154044' in COOKIE
-    print(json.dumps({
-        'type': 'check_cookie',
-        'is_logged_in': is_logged_in,
-        'is_stale_default': is_stale,
-        'uid': uid[:8] + '...' if uid else '',
-        'message': '✅ Cookie 包含有效登录态' if (is_logged_in and not is_stale) else '❌ Cookie 已过期或为默认值，需要更新'
-    }, ensure_ascii=False), flush=True)
-
-    # 2. 短链解析测试
     try:
-        r = requests.get(home_url, headers={'User-Agent': UA}, allow_redirects=True, timeout=10)
-        m = re.search(r'sec_uid=([^&]+)', r.url)
-        sec_uid = m.group(1) if m else None
-        print(json.dumps({
-            'type': 'check_redirect',
-            'success': bool(sec_uid),
-            'redirected_to': r.url[:80],
-            'sec_uid': sec_uid[:20] + '...' if sec_uid else None,
-            'message': '✅ 短链解析成功' if sec_uid else '❌ 短链解析失败'
-        }, ensure_ascii=False), flush=True)
+        sec_uid = get_sec_uid(home_url)
+        sys.stderr.write(f'[check] sec_uid: {sec_uid}\n')
     except Exception as e:
-        print(json.dumps({'type': 'check_redirect', 'success': False, 'message': f'❌ 短链解析失败: {e}'}, ensure_ascii=False), flush=True)
-        return
-
-    if not sec_uid:
-        return
-
-    # 3. API 视频列表测试
-    try:
-        payload = f'sec_user_id={sec_uid}&max_cursor=0&count=3&{DEFAULT_PAYLOAD_SUFFIX}'
-        url = signed_url(USER_POST_URL, payload)
-        r = requests.get(url, headers=DEFAULT_HEADER, timeout=15)
-        data = r.json() if r.content else {}
-        aweme_list = data.get('aweme_list') or []
-        print(json.dumps({
+        emit({
             'type': 'check_api',
-            'status_code': r.status_code,
-            'response_size': len(r.content),
-            'video_count': len(aweme_list),
-            'has_more': bool(data.get('has_more', 0)),
-            'message': f'✅ API 正常，返回 {len(aweme_list)} 条视频' if aweme_list else '❌ API 返回空数据（Cookie 失效最常见原因）'
-        }, ensure_ascii=False), flush=True)
-    except Exception as e:
-        print(json.dumps({'type': 'check_api', 'success': False, 'message': f'❌ API 请求失败: {e}'}, ensure_ascii=False), flush=True)
+            'success': False,
+            'message': f'获取 sec_uid 失败: {e}'
+        })
         return
 
-    # 4. 视频下载链接测试（只测试可达性，不实际下载）
-    if aweme_list:
-        v = aweme_list[0]
-        urls = v['video']['play_addr']['url_list']
-        video_url = next((u for u in urls if 'v26-web.douyinvod.com' not in u), urls[0])
-        cdn_url = video_url.replace('aweme.snssdk.com', 'api.amemv.com')
-        try:
-            rh = requests.head(cdn_url, headers={k: v for k, v in DEFAULT_HEADER.items() if v}, timeout=10, allow_redirects=True)
-            content_length = rh.headers.get('content-length', '?')
-            content_type = rh.headers.get('content-type', '?')
-            ok = rh.status_code == 200 and 'video' in content_type
-            print(json.dumps({
-                'type': 'check_download',
-                'status_code': rh.status_code,
-                'content_type': content_type,
-                'content_length': content_length,
-                'message': f'✅ 视频 CDN 可达，大小约 {int(content_length)//1024//1024}MB' if ok else f'❌ CDN 返回 {rh.status_code}，content-type={content_type}'
-            }, ensure_ascii=False), flush=True)
-        except Exception as e:
-            print(json.dumps({'type': 'check_download', 'success': False, 'message': f'❌ CDN 测试失败: {e}'}, ensure_ascii=False), flush=True)
+    try:
+        nickname, signature, ip_location = get_user_profile(sec_uid)
+        sys.stderr.write(f'[check] 用户: {nickname}\n')
+    except Exception as e:
+        emit({
+            'type': 'check_api',
+            'success': False,
+            'message': f'获取用户信息失败: {e}'
+        })
+        return
 
+    try:
+        items, _, _ = fetch_video_page(sec_uid)
+        count = len(items)
+        sys.stderr.write(f'[check] 第一页视频数: {count}\n')
+    except Exception as e:
+        emit({
+            'type': 'check_api',
+            'success': False,
+            'message': f'获取视频列表失败: {e}'
+        })
+        return
+
+    emit({
+        'type': 'check_api',
+        'success': True,
+        'nickname': nickname,
+        'ip_location': ip_location,
+        'first_page_count': count,
+        'message': f'✅ API 正常工作：{nickname}，第一页 {count} 条视频'
+    })
+
+# ── 主入口 ─────────────────────────────────────────────────────────────────────
 
 def main():
-    args = sys.argv[1:]
-
-    if not args:
-        sys.stderr.write(
-            '用法:\n'
-            '  # Cookie 诊断（先跑这个确认是否能正常工作）\n'
-            '  python monitor.py --check \'{"home_url":"https://v.douyin.com/xxx"}\'\n'
-            '  # 增量监控\n'
-            '  python monitor.py \'{"save_dir":"./Download","targets":[{"label":"xx","url":"https://v.douyin.com/xxx"}]}\'\n'
-            '  # 首次初始化（只抓列表，不下载）\n'
-            '  python monitor.py --init \'{"save_dir":"./Download","targets":[{"label":"xx","url":"https://v.douyin.com/xxx"}]}\'\n'
-            '  # 按需下载（指定下标，0=最新）\n'
-            '  python monitor.py --download \'{"save_dir":"./Download","label":"xx","home_url":"https://v.douyin.com/xxx","indices":[0]}\'\n'
-            '  # 按需下载（指定 aweme_id）\n'
-            '  python monitor.py --download \'{"save_dir":"./Download","label":"xx","home_url":"https://v.douyin.com/xxx","aweme_ids":["7123456789"]}\'\n'
-        )
+    if len(sys.argv) < 2:
+        sys.stderr.write('用法: python monitor.py [options] <json_config>\n')
+        sys.stderr.write('选项:\n')
+        sys.stderr.write('  --init     首次初始化（只抓列表不下载）\n')
+        sys.stderr.write('  --download 按需下载指定视频\n')
+        sys.stderr.write('  --check    检测 API 是否正常\n')
         sys.exit(1)
 
     mode = 'monitor'
-    if args[0] in ('--init', '--download', '--check'):
-        mode = args[0][2:]
-        args = args[1:]
+    if sys.argv[1] == '--init':
+        mode = 'init'
+        config_str = sys.argv[2] if len(sys.argv) > 2 else ''
+    elif sys.argv[1] == '--download':
+        mode = 'download'
+        config_str = sys.argv[2] if len(sys.argv) > 2 else ''
+    elif sys.argv[1] == '--check':
+        mode = 'check'
+        config_str = sys.argv[2] if len(sys.argv) > 2 else ''
+    else:
+        config_str = sys.argv[1]
 
-    if not args:
-        sys.stderr.write('错误：缺少 JSON 配置参数\n')
+    if not config_str:
+        sys.stderr.write('错误: 需要提供 JSON 配置\n')
         sys.exit(1)
 
-    config = json.loads(args[0])
+    try:
+        config = json.loads(config_str)
+    except json.JSONDecodeError as e:
+        sys.stderr.write(f'JSON 解析失败: {e}\n')
+        sys.exit(1)
 
-    if mode == 'check':
-        cmd_check(config['home_url'])
+    save_dir = config.get('save_dir', './Download')
+
+    if mode == 'init':
+        targets = config.get('targets', [])
+        for target in targets:
+            label = target.get('label', '')
+            url = target.get('url', '')
+            if label and url:
+                init_one(label, url, save_dir)
 
     elif mode == 'download':
-        save_dir  = config.get('save_dir', './Download')
-        label     = config['label']
-        home_url  = config['home_url']
-        indices   = config.get('indices')
+        label = config.get('label', '')
+        home_url = config.get('home_url', '')
+        indices = config.get('indices')
         aweme_ids = config.get('aweme_ids')
-        download_one(label, home_url, save_dir, indices=indices, aweme_ids=aweme_ids)
+        if label and home_url:
+            download_one(label, home_url, save_dir, indices, aweme_ids)
 
-    elif mode == 'init':
-        save_dir = config.get('save_dir', './Download')
-        for t in config.get('targets', []):
-            init_one(t['label'], t['url'], save_dir)
+    elif mode == 'check':
+        home_url = config.get('home_url', '')
+        if home_url:
+            check_api(home_url)
 
-    else:  # monitor
-        save_dir = config.get('save_dir', './Download')
-        for t in config.get('targets', []):
-            monitor_one(t['label'], t['url'], save_dir)
+    else:
+        targets = config.get('targets', [])
+        for target in targets:
+            label = target.get('label', '')
+            url = target.get('url', '')
+            if label and url:
+                monitor_one(label, url, save_dir)
 
 
 if __name__ == '__main__':
