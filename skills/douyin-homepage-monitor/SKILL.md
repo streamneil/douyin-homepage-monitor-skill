@@ -17,6 +17,22 @@ allowed-tools:
 - **执行模式**：定时或手动触发 → 增量检测新视频并下载通知
 - **按需下载模式**：用户要求下载某条视频 → 调用脚本下载并通过 channel 发送
 
+## ⛔ 严格禁止的行为
+
+**无论任何情况，以下方式绝对禁止，不得以任何理由使用：**
+
+1. **禁止使用浏览器工具下载视频**（WebFetch、browser_action、puppeteer 等）
+2. **禁止打开抖音网页、播放视频、提取 CDN 播放链接**
+3. **禁止读取 `document.cookie` 或浏览器 Cookie 来构造下载请求**
+4. **禁止使用 yt-dlp、you-get、ffmpeg 等第三方下载工具**
+5. **禁止直接 curl/wget 抖音页面或视频链接**
+
+**所有视频下载，唯一合法路径是：**
+```
+python3 scripts/monitor.py --download '...'
+```
+脚本内部使用 DouyinAPIClient（基于 jiji262/douyin-downloader）通过设备 Cookie + XBogus 签名获取下载链接，**不依赖浏览器登录态**。若脚本报错，应诊断脚本问题，而不是绕过脚本另寻他法。
+
 ## 当前监控配置
 
 !`cat .claude/douyin-homepage-monitor.local.md 2>/dev/null || echo "（配置文件不存在）"`
@@ -295,9 +311,9 @@ python3 scripts/monitor.py '{
 
 ## 注意事项
 
-- **按需下载**：始终通过 `python3 scripts/monitor.py --download` 下载，**绝不使用浏览器工具或 yt-dlp**，脚本使用 DouyinAPIClient（基于 jiji262/douyin-downloader）实时获取下载链接
-- **下载链接实时刷新**：脚本使用 `aweme_id` 实时调用 `get_video_detail` API 获取最新下载链接，**解决了 CDN 链接过期问题**，无需重新初始化
-- **Cookie 无需登录**：参考 jiji262/douyin-downloader 策略，使用设备标识 Cookie（ttwid、odin_tt 等）即可，不需要 sessionid/uid_tt 等登录态字段。ttwid 和 msToken 在运行时自动获取，`COOKIE` 变量留空也可正常运行
+- **⛔ 下载唯一入口**：所有视频下载必须且只能通过 `python3 scripts/monitor.py --download` 执行。脚本失败时应排查脚本本身（检查 stderr 输出、运行 `--check` 诊断），**严禁绕过脚本改用浏览器、yt-dlp、curl 或任何其他方式**
+- **下载链接实时刷新**：脚本使用 `aweme_id` 实时调用 `get_video_detail` API 获取最新下载链接，解决 CDN 链接过期问题，无需重新初始化
+- **Cookie 无需登录**：脚本使用设备标识 Cookie（ttwid、odin_tt 等）+ XBogus 签名，不依赖浏览器登录态。ttwid 和 msToken 在运行时自动获取，`COOKIE` 变量留空也可正常运行
 - **诊断命令**：若 API 返回数据为空，先运行：
   ```bash
   cd {PLUGIN_DIR}
