@@ -22,25 +22,83 @@
   python monitor.py --download '{"save_dir":"./Download","label":"xx","home_url":"https://v.douyin.com/xxx","aweme_ids":["7123456789"]}'
 """
 
-import re, requests, json, sys, os, time, hashlib, base64
+import re, requests, json, sys, os, time, hashlib, base64, random, string
 from contextlib import closing
 
 # ── 常量 ──────────────────────────────────────────────────────────────────────
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36"
 
-# 请将此 COOKIE 替换为从浏览器抖音网页版复制的最新值
-# 打开 https://www.douyin.com → F12 → Network → 任意请求 → Request Headers → cookie
-# ⚠️  Cookie 失效是获取视频列表不完整的最常见原因，请保持更新
+# ⚠️  重要：抖音 API 自 2024 年底起要求有效的登录态 Cookie 才能返回数据。
+# 请将以下 COOKIE 替换为从浏览器抖音网页版复制的最新值：
+#   打开 https://www.douyin.com → 登录账号 → F12 → Network → 任意请求 → Request Headers → 复制 cookie 字段
+# Cookie 有效期约数月，过期后 API 返回 200 但 body 为空（无法获取视频列表）。
 COOKIE = "douyin.com; device_web_cpu_core=8; device_web_memory_size=8; csrf_session_id=14825116dc9c2fcd63d4632119bc532c; FORCE_LOGIN=%7B%22videoConsumedRemainSeconds%22%3A180%7D; xgplayer_user_id=571413576421; xg_device_score=6.792332233647336; passport_csrf_token=7e267631ddc818b02128b8c7e08f294a; passport_csrf_token_default=7e267631ddc818b02128b8c7e08f294a; bd_ticket_guard_client_web_domain=2; SEARCH_RESULT_LIST_TYPE=%22single%22; download_guide=%223%2F20240507%2F0%22; volume_info=%7B%22isUserMute%22%3Afalse%2C%22isMute%22%3Atrue%2C%22volume%22%3A0.5%7D; pwa2=%220%7C0%7C3%7C0%22; ttwid=1%7Ctszc2J_dOM7jx_4PCBZRSCJxUKi5I4i2Nr9wbDnFcug%7C1715154044%7C88fcb9e48adcf9bde355bf1fee18944e5a1021d415d465734b31a82e20fb91dc; xgplayer_device_id=35940013617; d_ticket=67d954e5df833256ebcd2fc59d5aff4154e38; odin_tt=4f6cc09deb42a3125cf0dea9783bcaf20c4ca064978825d6d42c3dcad395581749e266990b98b09807cc83e935c25f86e3611fe01e62685c3d16883d4d22be3f; passport_assist_user=CkEuJUi8ALBdSpvLAsYaK9YrnGMEwuvMzRpFuHlfHatDzvm8cWky2du-OWo801eRNNCqgsAI1uiSzxIOekE11f0AUBpKCjzJ7QgCPIOp8i11d5cdpE1jYDbjQOZ5azOqKML28BtPcARRQnH37tRD3tBYdTj3YuauEHGz4XSXeR1BpSUQkvbQDRiJr9ZUIAEiAQPnNCmn; n_mh=_QbRJA7TRnnvOnh2XfgXThpiklCKGc1RCDDX8HAsJjU; passport_auth_status=dc33df43ccce4674112c996ad1f3359a%2C941150a1c20a7bd3548cefab4d816c89; passport_auth_status_ss=dc33df43ccce4674112c996ad1f3359a%2C941150a1c20a7bd3548cefab4d816c89; sid_guard=d2a76c9db9e8d914fda02be1e608d287%7C1715336743%7C5184000%7CTue%2C+09-Jul-2024+10%3A25%3A43+GMT; uid_tt=8f6f72b1323ae8dec49d595d16657b68; uid_tt_ss=8f6f72b1323ae8dec49d595d16657b68; sid_tt=d2a76c9db9e8d914fda02be1e608d287; sessionid=d2a76c9db9e8d914fda02be1e608d287; sessionid_ss=d2a76c9db9e8d914fda02be1e608d287; msToken=gKn58dVmX7RgljlSJ6HJ94Y4zIrSzLuTQg17b4GtTj1HGkJdtLO2ED2_Qf2YY93Ie_y2SM1LSrHez8i9PO2XPGpxwLUJyTnRtxMq4f8Ekx2kv53K6XLRIQdmdDmLcNE=; IsDouyinActive=true"
 
-DEFAULT_PAYLOAD_SUFFIX = "device_platform=webapp&aid=6383&channel=channel_pc_web&publish_video_strategy_type=2&source=channel_pc_web&personal_center_strategy=1&update_version_code=170400&pc_client_type=1&version_code=170400&version_name=17.4.0&cookie_enabled=true&screen_width=853&screen_height=1280&browser_language=en&browser_platform=MacIntel&browser_name=Chrome&browser_version=120.0.0.0&browser_online=true&engine_name=Blink&engine_version=120.0.0.0&os_name=Windows&os_version=10&cpu_core_num=8&device_memory=8&platform=PC&downlink=1.25&effective_type=3g&round_trip_time=250&webid=7363610890434774591&msToken=VDd-lnvmJ5sh8YUvkpm6rcozUMIL_FmRtQvY-BsyEZhAR0_rdOSA5hnHeNqQrtqfztN388mOQ4At6M4t-HUe6JMPEWvYbt8BJUTQUc87511FFs9dnbHAfO6dII4BTA=="
+# ── Cookie 动态补全 ────────────────────────────────────────────────────────────
+
+def _gen_mstoken(length=107):
+    """生成随机 msToken"""
+    chars = string.ascii_letters + string.digits + '='
+    return ''.join(random.choices(chars, k=length))
+
+def _fetch_ttwid():
+    """动态获取 ttwid（无需登录）"""
+    try:
+        url = 'https://ttwid.bytedance.com/ttwid/union/register/'
+        data = ('{"region":"cn","aid":1768,"needFid":false,"service":"www.ixigua.com",'
+                '"migrate_info":{"ticket":"","source":"node"},"cbUrlProtocol":"https","union":true}')
+        res = requests.post(url, data=data, timeout=8)
+        for _, v in res.cookies.items():
+            return v
+    except Exception:
+        pass
+    return ''
+
+def _build_runtime_auth():
+    """
+    构建运行时 Cookie 和 msToken。
+    - 若 COOKIE 包含有效登录态（sessionid 非默认过期值），直接使用
+    - 否则动态获取 ttwid + 随机 msToken（API 仍可能返回空，需用户更新 Cookie）
+    返回 (cookie_str, mstoken_str)
+    """
+    # 检测是否为已知过期的默认 Cookie（时间戳 1715154044 = 2024-05-08）
+    is_stale = '1715154044' in COOKIE
+
+    if is_stale:
+        ttwid = _fetch_ttwid()
+        mstoken = _gen_mstoken()
+        cookie = f'ttwid={ttwid}; msToken={mstoken}' if ttwid else f'msToken={mstoken}'
+        sys.stderr.write('[auth] 检测到默认过期 Cookie，已动态获取 ttwid\n')
+        sys.stderr.write('[auth] ⚠️  抖音 API 现要求完整登录 Cookie，请更新 COOKIE 变量\n')
+    else:
+        cookie = COOKIE
+        mstoken_m = re.search(r'msToken=([^;]+)', COOKIE)
+        mstoken = mstoken_m.group(1).strip() if mstoken_m else _gen_mstoken()
+        sys.stderr.write('[auth] 使用配置的完整 Cookie\n')
+
+    return cookie, mstoken
+
+_RUNTIME_COOKIE, _RUNTIME_MSTOKEN = _build_runtime_auth()
+
+DEFAULT_PAYLOAD_SUFFIX = (
+    "device_platform=webapp&aid=6383&channel=channel_pc_web"
+    "&publish_video_strategy_type=2&source=channel_pc_web"
+    "&personal_center_strategy=1&update_version_code=170400"
+    "&pc_client_type=1&version_code=170400&version_name=17.4.0"
+    "&cookie_enabled=true&screen_width=853&screen_height=1280"
+    "&browser_language=en&browser_platform=MacIntel&browser_name=Chrome"
+    "&browser_version=120.0.0.0&browser_online=true&engine_name=Blink"
+    "&engine_version=120.0.0.0&os_name=Windows&os_version=10"
+    "&cpu_core_num=8&device_memory=8&platform=PC&downlink=1.25"
+    f"&effective_type=3g&round_trip_time=250&webid=7363610890434774591"
+    f"&msToken={_RUNTIME_MSTOKEN}"
+)
 
 DEFAULT_HEADER = {
     'User-Agent': UA,
     'referer': 'https://www.douyin.com/',
-    'accept-encoding': None,
-    'Cookie': COOKIE
+    'Cookie': _RUNTIME_COOKIE,
 }
 
 USER_POST_URL    = 'https://www.douyin.com/aweme/v1/web/aweme/post/?'
@@ -609,12 +667,92 @@ def monitor_one(label, home_url, save_dir):
         save_history(home_url, v['aweme_id'])
 
 
+def cmd_check(home_url):
+    """
+    --check 诊断模式：测试 Cookie 和 API 是否正常工作。
+    输出 JSON Lines 格式的诊断结果。
+    """
+    print(json.dumps({'type': 'check_start', 'message': '开始诊断...'}, ensure_ascii=False), flush=True)
+
+    # 1. Cookie 登录态检测
+    is_logged_in, uid = check_login_status()
+    is_stale = '1715154044' in COOKIE
+    print(json.dumps({
+        'type': 'check_cookie',
+        'is_logged_in': is_logged_in,
+        'is_stale_default': is_stale,
+        'uid': uid[:8] + '...' if uid else '',
+        'message': '✅ Cookie 包含有效登录态' if (is_logged_in and not is_stale) else '❌ Cookie 已过期或为默认值，需要更新'
+    }, ensure_ascii=False), flush=True)
+
+    # 2. 短链解析测试
+    try:
+        r = requests.get(home_url, headers={'User-Agent': UA}, allow_redirects=True, timeout=10)
+        m = re.search(r'sec_uid=([^&]+)', r.url)
+        sec_uid = m.group(1) if m else None
+        print(json.dumps({
+            'type': 'check_redirect',
+            'success': bool(sec_uid),
+            'redirected_to': r.url[:80],
+            'sec_uid': sec_uid[:20] + '...' if sec_uid else None,
+            'message': '✅ 短链解析成功' if sec_uid else '❌ 短链解析失败'
+        }, ensure_ascii=False), flush=True)
+    except Exception as e:
+        print(json.dumps({'type': 'check_redirect', 'success': False, 'message': f'❌ 短链解析失败: {e}'}, ensure_ascii=False), flush=True)
+        return
+
+    if not sec_uid:
+        return
+
+    # 3. API 视频列表测试
+    try:
+        payload = f'sec_user_id={sec_uid}&max_cursor=0&count=3&{DEFAULT_PAYLOAD_SUFFIX}'
+        url = signed_url(USER_POST_URL, payload)
+        r = requests.get(url, headers=DEFAULT_HEADER, timeout=15)
+        data = r.json() if r.content else {}
+        aweme_list = data.get('aweme_list') or []
+        print(json.dumps({
+            'type': 'check_api',
+            'status_code': r.status_code,
+            'response_size': len(r.content),
+            'video_count': len(aweme_list),
+            'has_more': bool(data.get('has_more', 0)),
+            'message': f'✅ API 正常，返回 {len(aweme_list)} 条视频' if aweme_list else '❌ API 返回空数据（Cookie 失效最常见原因）'
+        }, ensure_ascii=False), flush=True)
+    except Exception as e:
+        print(json.dumps({'type': 'check_api', 'success': False, 'message': f'❌ API 请求失败: {e}'}, ensure_ascii=False), flush=True)
+        return
+
+    # 4. 视频下载链接测试（只测试可达性，不实际下载）
+    if aweme_list:
+        v = aweme_list[0]
+        urls = v['video']['play_addr']['url_list']
+        video_url = next((u for u in urls if 'v26-web.douyinvod.com' not in u), urls[0])
+        cdn_url = video_url.replace('aweme.snssdk.com', 'api.amemv.com')
+        try:
+            rh = requests.head(cdn_url, headers={k: v for k, v in DEFAULT_HEADER.items() if v}, timeout=10, allow_redirects=True)
+            content_length = rh.headers.get('content-length', '?')
+            content_type = rh.headers.get('content-type', '?')
+            ok = rh.status_code == 200 and 'video' in content_type
+            print(json.dumps({
+                'type': 'check_download',
+                'status_code': rh.status_code,
+                'content_type': content_type,
+                'content_length': content_length,
+                'message': f'✅ 视频 CDN 可达，大小约 {int(content_length)//1024//1024}MB' if ok else f'❌ CDN 返回 {rh.status_code}，content-type={content_type}'
+            }, ensure_ascii=False), flush=True)
+        except Exception as e:
+            print(json.dumps({'type': 'check_download', 'success': False, 'message': f'❌ CDN 测试失败: {e}'}, ensure_ascii=False), flush=True)
+
+
 def main():
     args = sys.argv[1:]
 
     if not args:
         sys.stderr.write(
             '用法:\n'
+            '  # Cookie 诊断（先跑这个确认是否能正常工作）\n'
+            '  python monitor.py --check \'{"home_url":"https://v.douyin.com/xxx"}\'\n'
             '  # 增量监控\n'
             '  python monitor.py \'{"save_dir":"./Download","targets":[{"label":"xx","url":"https://v.douyin.com/xxx"}]}\'\n'
             '  # 首次初始化（只抓列表，不下载）\n'
@@ -627,7 +765,7 @@ def main():
         sys.exit(1)
 
     mode = 'monitor'
-    if args[0] in ('--init', '--download'):
+    if args[0] in ('--init', '--download', '--check'):
         mode = args[0][2:]
         args = args[1:]
 
@@ -637,7 +775,10 @@ def main():
 
     config = json.loads(args[0])
 
-    if mode == 'download':
+    if mode == 'check':
+        cmd_check(config['home_url'])
+
+    elif mode == 'download':
         save_dir  = config.get('save_dir', './Download')
         label     = config['label']
         home_url  = config['home_url']

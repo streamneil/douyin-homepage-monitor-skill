@@ -300,7 +300,13 @@ python3 scripts/monitor.py '{
 ## 注意事项
 
 - **按需下载**：始终通过 `python3 scripts/monitor.py --download` 下载，**绝不使用浏览器工具或 yt-dlp**，脚本直接用带 Cookie 的 HTTP 请求拉取 CDN 直链
+- **Cookie 是一切的前提**：抖音 API 自 2024 年底起要求完整登录态 Cookie，否则 API 返回 200 但 body 为空。若 API 返回空数据，第一步永远是更新 Cookie
+- **诊断命令**：若怀疑 Cookie 失效，先运行：
+  ```bash
+  cd {PLUGIN_DIR}
+  python3 scripts/monitor.py --check '{"home_url":"https://v.douyin.com/xxx"}'
+  ```
+  输出 `check_api.message` 为 ✅ 才说明 Cookie 有效
 - 多博主：每个博主的 history/catalog 文件均以其 URL 的 md5 命名，互不干扰；执行模式必须传入所有 targets
-- Cookie 失效时下载会收到 `download_failed` 错误，需更新 COOKIE 变量
 - 历史文件（`*.history`）和目录缓存（`*.json`）存储在 plugin 目录下，不要删除
 - `--init` 后 catalog 已缓存视频 URL，但抖音 CDN 链接有效期约数小时；若下载时报 URL 过期，重新 `--init` 即可刷新
