@@ -226,20 +226,27 @@ def parse_video(item):
     """从 aweme item 提取关键字段"""
     ts = item['create_time']
     dt = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts))
+    date_prefix = time.strftime('%Y-%m-%d', time.localtime(ts))
     raw_desc = item.get('desc', '') or ''
     safe_desc = re.sub(r'[\\/:*?"<>|]', '', raw_desc) or '无标题'
-    title = f'[{dt}] {safe_desc}'
+    # 文件名格式：[日期] 标题，方便排序和识别
+    title = f'[{date_prefix}] {safe_desc}'
     # 优先选非 v26-web.douyinvod.com 的 CDN
     urls = item['video']['play_addr']['url_list']
     video_url = next((u for u in urls if 'v26-web.douyinvod.com' not in u), urls[0])
     cover_url = item['video']['cover']['url_list'][0]
+    # 提取点赞数
+    stats = item.get('statistics') or {}
+    digg_count = stats.get('digg_count', 0)
     return {
-        'aweme_id':   item['aweme_id'],
-        'title':      title,
-        'desc':       safe_desc,
+        'aweme_id':    item['aweme_id'],
+        'title':       title,
+        'desc':        safe_desc,
         'create_time': dt,
-        'url':        video_url,
-        'cover_url':  cover_url,
+        'date':        date_prefix,
+        'url':         video_url,
+        'cover_url':   cover_url,
+        'digg_count':  digg_count,
     }
 
 # ── 视频下载 ───────────────────────────────────────────────────────────────────
@@ -327,7 +334,7 @@ def init_one(label, home_url, save_dir):
     downloaded = []
     failed = []
 
-    # 从最早的视频开始下载（倒序）
+    # 从最早的视频开始下载（倒序，保证按时间顺序写历史）
     for item in reversed(all_items):
         v = parse_video(item)
         dest = os.path.join(user_dir, v['title'])
@@ -337,19 +344,44 @@ def init_one(label, home_url, save_dir):
         if os.path.exists(mp4_path):
             sys.stderr.write(f'[init] 已存在，跳过: {v["title"]}\n')
             save_history(home_url, v['aweme_id'])
-            downloaded.append({'title': v['desc'], 'create_time': v['create_time'], 'file_path': mp4_path})
+            downloaded.append({
+                'title':       v['desc'],
+                'create_time': v['create_time'],
+                'date':        v['date'],
+                'digg_count':  v['digg_count'],
+                'cover_url':   v['cover_url'],
+                'file_path':   mp4_path,
+            })
             continue
 
         try:
             sys.stderr.write(f'[init] 下载: {v["title"]}\n')
             file_path = download_video(v['url'], dest)
             save_history(home_url, v['aweme_id'])
-            downloaded.append({'title': v['desc'], 'create_time': v['create_time'], 'file_path': file_path})
+            downloaded.append({
+                'title':       v['desc'],
+                'create_time': v['create_time'],
+                'date':        v['date'],
+                'digg_count':  v['digg_count'],
+                'cover_url':   v['cover_url'],
+                'file_path':   file_path,
+            })
         except Exception as e:
             sys.stderr.write(f'[init] 下载失败: {v["title"]} — {e}\n')
             # 下载失败也写入历史，避免重复下载
             save_history(home_url, v['aweme_id'])
-            failed.append({'title': v['desc'], 'create_time': v['create_time'], 'error': str(e)})
+            failed.append({
+                'title':       v['desc'],
+                'create_time': v['create_time'],
+                'digg_count':  v['digg_count'],
+                'cover_url':   v['cover_url'],
+                'file_path':   '',
+                'error':       str(e),
+            })
+
+    # video_list 按发布时间从新到旧排列，方便 SKILL.md 展示最近 10 条
+    all_results = downloaded + failed
+    all_results.sort(key=lambda x: x['create_time'], reverse=True)
 
     # 6. 输出 init_complete 事件
     emit({
@@ -362,7 +394,7 @@ def init_one(label, home_url, save_dir):
         'total_videos':   total_count,
         'downloaded':     len(downloaded),
         'failed':         len(failed),
-        'video_list':     downloaded,  # 完整列表，供 SKILL.md 展示
+        'video_list':     all_results,  # 从新到旧，供 SKILL.md 展示最近10条并发送
         'login_warning':  not is_logged_in,
         'message': (
             f'{label}（{nickname}）初始化完成：'
