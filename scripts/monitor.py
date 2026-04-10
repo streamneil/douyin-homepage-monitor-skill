@@ -601,12 +601,15 @@ def monitor_one(label: str, home_url: str, save_dir: str):
     save_profile(home_url, nickname, signature, ip_location, sec_uid)
 
     history = load_history(home_url)
+    new_videos = []
+
+    # 只取第一页（定时监控场景：正常情况新视频只会出现在最前面）
+    # 若第一页全部都是新视频（极端情况：用户一次发布超过 20 条），继续翻页直到遇到已知视频
     max_cursor = 0
     has_more = True
-    new_videos = []
     attempts = 0
 
-    while has_more and attempts < 15:
+    while has_more and attempts < 5:
         attempts += 1
         try:
             items, max_cursor, has_more = fetch_video_page(sec_uid, max_cursor)
@@ -614,12 +617,15 @@ def monitor_one(label: str, home_url: str, save_dir: str):
             sys.stderr.write(f'[monitor] 获取视频页失败: {e}\n')
             break
 
+        if not items:
+            break
+
         parsed = [parse_video(i) for i in items]
         page_new = [v for v in parsed if v.get('aweme_id') and v['aweme_id'] not in history]
         new_videos.extend(page_new)
 
-        # 整页都是已知视频，说明已到达历史边界
-        if parsed and all(v.get('aweme_id') in history for v in parsed):
+        # 本页出现已知视频，说明已到达历史边界，停止翻页
+        if any(v.get('aweme_id') in history for v in parsed):
             break
 
     if not new_videos:

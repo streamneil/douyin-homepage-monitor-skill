@@ -19,19 +19,25 @@ allowed-tools:
 
 ## ⛔ 严格禁止的行为
 
-**无论任何情况，以下方式绝对禁止，不得以任何理由使用：**
+**无论任何情况，以下行为绝对禁止，不得以任何理由使用：**
 
-1. **禁止使用浏览器工具下载视频**（WebFetch、browser_action、puppeteer 等）
-2. **禁止打开抖音网页、播放视频、提取 CDN 播放链接**
-3. **禁止读取 `document.cookie` 或浏览器 Cookie 来构造下载请求**
-4. **禁止使用 yt-dlp、you-get、ffmpeg 等第三方下载工具**
-5. **禁止直接 curl/wget 抖音页面或视频链接**
+1. **禁止自行调用抖音接口**（WebFetch、curl、requests 等）来获取视频列表或用户信息
+2. **禁止自行对比视频 ID、自行判断"是否有新视频"**——判断逻辑全部在脚本内部
+3. **禁止使用浏览器工具下载视频**（browser_action、puppeteer 等）
+4. **禁止打开抖音网页、播放视频、提取 CDN 播放链接**
+5. **禁止读取 `document.cookie` 或浏览器 Cookie 来构造下载请求**
+6. **禁止使用 yt-dlp、you-get、ffmpeg 等第三方下载工具**
 
-**所有视频下载，唯一合法路径是：**
-```
-python3 scripts/monitor.py --download '...'
-```
-脚本内部使用 DouyinAPIClient（基于 jiji262/douyin-downloader）通过设备 Cookie + XBogus 签名获取下载链接，**不依赖浏览器登录态**。若脚本报错，应诊断脚本问题，而不是绕过脚本另寻他法。
+**所有操作的唯一合法路径：**
+
+| 操作 | 命令 |
+|------|------|
+| 首次初始化 | `python3 scripts/monitor.py --init '...'` |
+| 定时/手动监控 | `python3 scripts/monitor.py '...'` |
+| 按需下载 | `python3 scripts/monitor.py --download '...'` |
+| API 诊断 | `python3 scripts/monitor.py --check '...'` |
+
+脚本内部使用 DouyinAPIClient（基于 jiji262/douyin-downloader）处理 API 签名和 Cookie。若脚本报错，应先运行 `--check` 诊断，而不是绕过脚本另寻他法。
 
 ## 当前监控配置
 
@@ -253,6 +259,9 @@ send_message 工具：
 
 ## 执行模式：增量监控检测
 
+> **重要**：执行模式的所有检测和下载逻辑，必须完全依赖 `python3 scripts/monitor.py` 脚本完成。
+> **严禁**自行调用抖音接口、自行对比视频 ID、自行判断"是否有新视频"——这些判断逻辑全部在脚本内部。
+
 ### 第 1 步：读取配置
 
 读取 `.claude/douyin-homepage-monitor.local.md`，获取所有 targets 和 save_dir。
@@ -260,9 +269,16 @@ send_message 工具：
 配置不存在 → 询问用户并切换到配置模式。
 `enabled: false` → 提示运行 `/douyin-homepage-monitor:resume`。
 
-### 第 2 步：运行增量监控（传入所有 targets）
+### 第 2 步：运行增量监控脚本（传入所有 targets）
 
 **必须传入配置文件中的全部 targets，不能只传一个。**
+
+脚本内部逻辑（你无需自己实现，了解即可）：
+- 取博主主页第一页视频列表
+- 与本地已保存的历史 aweme_id 集合对比
+- 凡是不在历史记录中的视频 = 新视频
+- 将新视频下载到本地，并更新历史记录
+- 每个 target 处理完后输出 JSON 事件
 
 ```bash
 PLUGIN_DIR=$(dirname $(dirname $(realpath ${CLAUDE_SKILL_PATH:-./skills/douyin-homepage-monitor/SKILL.md})))
@@ -276,47 +292,51 @@ python3 scripts/monitor.py '{
 }'
 ```
 
-### 第 3 步：解析事件并通知
+### 第 3 步：逐行解析脚本输出的 JSON 事件并通知
 
-#### 事件：`new_video`
+脚本输出格式为 JSON Lines（每行一个事件），**按输出顺序逐条处理**：
+
+#### 事件：`new_video` — 检测到新视频且已下载完成
 
 ```json
 {
   "type": "new_video",
-  "label": "WP",
-  "nickname": "实际昵称",
+  "label": "二丽",
+  "nickname": "溪水伊人🍭",
+  "aweme_id": "7626255378334746107",
   "title": "视频标题",
   "create_time": "2024-05-10 20:00:00",
   "cover_url": "https://...",
   "digg_count": 0,
-  "file_path": "/path/to/Download/昵称/[2024-05-10] 视频标题.mp4"
+  "file_path": "/path/to/Download/溪水伊人🍭/[2024-05-10] 视频标题.mp4"
 }
 ```
 
-通知格式（**新视频不显示点赞数**，因为刚发布时数据不准确）：
-- 文字：`{label} 发布了新内容：{title}\n📅 {create_time}`
-- 附件 1：封面图（cover_url）
-- 附件 2：视频文件（file_path）
+**收到此事件后立即通过 channel 发送通知**（不等后续事件）：
+
+- `file_path` 非空（下载成功）：
+  - 文字：`{label} 发布了新内容：{title}\n📅 {create_time}`
+  - 附件 1：封面图（`cover_url`，作为图片 URL）
+  - 附件 2：**视频文件**（`file_path`，本地文件路径）
+- `file_path` 为空（下载失败）：只发封面图 + 文字，末尾注明"（视频下载失败）"
 
 按 channel 优先级发送：iMessage > Telegram > Discord > 终端输出。
 
-#### 事件：`profile_update`
+#### 事件：`profile_update` — 主页信息变更
 
 发送纯文字：`{message}`
 
-#### 事件：`monitor_summary`
-
-每个 target 处理完毕后均会发出此事件（无论是否有新视频）：
+#### 事件：`monitor_summary` — 本 target 检测完毕
 
 ```json
-{"type": "monitor_summary", "label": "WP", "nickname": "实际昵称", "new_count": 0}
+{"type": "monitor_summary", "label": "二丽", "nickname": "溪水伊人🍭", "new_count": 2}
 ```
 
-**用此事件汇总摘要**，不要依赖 stderr 输出。
+用于最终汇总，不单独发送通知。
 
-### 第 4 步：输出摘要
+### 第 4 步：输出汇总摘要
 
-收集所有 `monitor_summary` 事件后输出：
+所有 targets 处理完毕后，根据收集到的 `monitor_summary` 事件输出：
 
 ```
 检测完成（{datetime}）：
