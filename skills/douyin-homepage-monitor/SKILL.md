@@ -110,6 +110,22 @@ python3 scripts/monitor.py --init '{"save_dir":"{PLUGIN_DIR}/Download","targets"
 
 ### 第 5 步：处理 init_complete 事件
 
+#### 事件：`error`（code: cookie_invalid）
+
+```
+⚠️  Cookie 未配置或缺少登录字段！
+
+抖音 API 需要登录态 Cookie 才能获取完整视频列表（超过约 20 条）。
+
+更新步骤：
+1. 浏览器打开 https://www.douyin.com 并登录
+2. F12 → Network → 刷新页面 → 任意请求 → Request Headers → 复制 cookie 值
+3. 编辑 {PLUGIN_DIR}/scripts/monitor.py，将 COOKIE 变量（约第 25 行）替换
+4. 重新运行：帮我监控 {label} {url}
+```
+
+仍继续处理后续事件（Cookie 缺失时 API 可能只返回部分数据）。
+
 #### 事件：`init_complete`
 
 展示摘要，**不自动下载，不自动发送视频**：
@@ -131,6 +147,8 @@ python3 scripts/monitor.py --init '{"save_dir":"{PLUGIN_DIR}/Download","targets"
 
 💡 如需查看某条视频，告诉我"下载第N条"即可。
 ```
+
+若 `login_warning: true`，末尾追加 Cookie 提示。
 
 ### 第 6 步：首次配置时提示依赖
 
@@ -313,7 +331,7 @@ python3 scripts/monitor.py '{
 
 - **⛔ 下载唯一入口**：所有视频下载必须且只能通过 `python3 scripts/monitor.py --download` 执行。脚本失败时应排查脚本本身（检查 stderr 输出、运行 `--check` 诊断），**严禁绕过脚本改用浏览器、yt-dlp、curl 或任何其他方式**
 - **下载链接实时刷新**：脚本使用 `aweme_id` 实时调用 `get_video_detail` API 获取最新下载链接，解决 CDN 链接过期问题，无需重新初始化
-- **Cookie 无需登录**：脚本使用设备标识 Cookie（ttwid、odin_tt 等）+ XBogus 签名，不依赖浏览器登录态。ttwid 和 msToken 在运行时自动获取，`COOKIE` 变量留空也可正常运行
+- **Cookie 需要登录态**：抖音 API 需要 `sessionid`、`uid_tt` 等登录字段才能获取完整视频列表（超过约 20 条）。`ttwid` 和 `msToken` 在运行时自动获取，但登录态 Cookie 需用户手动配置。若 API 返回空数据或视频数量异常少，第一步永远是检查 Cookie
 - **诊断命令**：若 API 返回数据为空，先运行：
   ```bash
   cd {PLUGIN_DIR}

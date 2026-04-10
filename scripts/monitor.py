@@ -42,19 +42,18 @@ from lib import DouyinAPIClient, sanitize_cookies, parse_cookie_header
 
 # ── 常量 ──────────────────────────────────────────────────────────────────────
 
-# Cookie 配置（可选）：
-# 无需登录即可使用。参考 jiji262/douyin-downloader 的策略，使用设备标识 Cookie 即可：
-#   ttwid、odin_tt、s_v_web_id、__ac_nonce 等（浏览器 F12 → Network → cookie 字段）
-# 注意：请勿填入登录态字段（sessionid、uid_tt 等），这些字段不被使用且无必要。
-# ttwid 和 msToken 会在运行时自动动态获取，此处留空也可正常运行。
+# Cookie 配置（必须）：
+# 抖音 API 需要完整的浏览器登录 Cookie 才能获取用户视频列表（超过首页约 20 条）。
+# 参考 jiji262/douyin-downloader 的 cookie_fetcher：需要 sessionid、sid_tt、sid_guard 等登录字段。
+#
+# 获取步骤：
+#   1. 浏览器打开 https://www.douyin.com 并登录
+#   2. F12 → Network → 刷新页面 → 任意请求 → Request Headers → 复制 cookie 字段的完整值
+#   3. 粘贴到下方 COOKIE = "" 的引号内
+#
+# ttwid 和 msToken 会在运行时自动动态获取并覆盖 Cookie 中的旧值。
+# Cookie 失效后（通常数月）重复上述步骤更新即可。
 COOKIE = ""
-
-# 运行时不使用的登录态字段（与 jiji262/douyin-downloader 保持一致）
-_LOGIN_FIELDS = frozenset({
-    'sessionid', 'sessionid_ss', 'sid_tt', 'sid_guard',
-    'uid_tt', 'uid_tt_ss', 'passport_auth_status', 'passport_auth_status_ss',
-    'passport_assist_user', 'passport_auth_mix_state', 'passport_mfa_token', 'login_time',
-})
 
 # ── Cookie 构建 ────────────────────────────────────────────────────────────────
 
@@ -73,22 +72,17 @@ def _fetch_ttwid() -> str:
 
 def _build_runtime_cookies() -> Dict[str, str]:
     """
-    构建运行时 Cookie（无需登录）。
-    策略（参考 jiji262/douyin-downloader）：
-    1. 从 COOKIE 中提取设备标识字段，过滤掉登录态字段
-    2. 动态获取真实 ttwid 并覆盖（字节跳动官方接口，无需登录）
+    构建运行时 Cookie。
+    策略（参考 jiji262/douyin-downloader cookie_fetcher 的 SUGGESTED_KEYS）：
+    1. 以用户配置的完整登录 Cookie 为基础（需含 sessionid、sid_tt、sid_guard 等）
+    2. 动态获取真实 ttwid 并覆盖旧值（字节跳动官方接口，无需登录）
     3. msToken 由 MsTokenManager 在首次请求时自动注入
     """
-    # 从用户配置的 Cookie 中提取设备字段，屏蔽登录态字段
-    cookies: Dict[str, str] = {
-        k: v for k, v in parse_cookie_header(COOKIE).items()
-        if k not in _LOGIN_FIELDS
-    } if COOKIE else {}
+    cookies: Dict[str, str] = parse_cookie_header(COOKIE) if COOKIE else {}
 
-    # 基础设备标识
+    # 基础设备标识（若 Cookie 中不存在则补充）
     cookies.setdefault('device_web_cpu_core', '8')
     cookies.setdefault('device_web_memory_size', '8')
-    cookies.setdefault('odin_tt', '')
 
     # 动态获取 ttwid 并覆盖（保证新鲜度）
     ttwid = _fetch_ttwid()
@@ -97,6 +91,9 @@ def _build_runtime_cookies() -> Dict[str, str]:
         cookies['ttwid'] = ttwid
     else:
         sys.stderr.write('[auth] ttwid 获取失败，将使用 Cookie 中的旧值\n')
+
+    if not COOKIE:
+        sys.stderr.write('[auth] 警告：COOKIE 未配置，无登录态下 API 将只返回有限数据\n')
 
     return sanitize_cookies(cookies)
 
@@ -110,6 +107,18 @@ def get_api_client() -> DouyinAPIClient:
     if _API_CLIENT is None:
         _API_CLIENT = DouyinAPIClient(cookies=_build_runtime_cookies())
     return _API_CLIENT
+
+# ── Cookie 有效性检测 ──────────────────────────────────────────────────────────
+
+def check_login_status() -> bool:
+    """检测 COOKIE 变量中是否包含登录态字段（sessionid + uid_tt）"""
+    if not COOKIE:
+        return False
+    session_match = re.search(r'sessionid=([^;]+)', COOKIE)
+    uid_match = re.search(r'uid_tt=([^;]+)', COOKIE)
+    session_id = session_match.group(1).strip() if session_match else ''
+    uid_tt = uid_match.group(1).strip() if uid_match else ''
+    return bool(session_id and len(session_id) >= 20 and uid_tt)
 
 # ── 文件存储 ───────────────────────────────────────────────────────────────────
 
@@ -357,7 +366,22 @@ def init_one(label: str, home_url: str, save_dir: str):
     """
     sys.stderr.write(f'[init] 开始初始化: {label} ({home_url})\n')
 
-    # 1. 获取 sec_uid
+    # 1. 检测登录态，未登录时提前警告
+    is_logged_in = check_login_status()
+    if not is_logged_in:
+        emit({
+            'type': 'error',
+            'code': 'cookie_invalid',
+            'label': label,
+            'message': (
+                'Cookie 未配置或缺少登录字段（sessionid/uid_tt）。'
+                '抖音 API 需要登录态才能获取完整视频列表，'
+                '请更新 scripts/monitor.py 中的 COOKIE 变量后重试。'
+            )
+        })
+        sys.stderr.write('[init] 警告：Cookie 未登录，继续尝试但结果可能不完整\n')
+
+    # 2. 获取 sec_uid
     try:
         sec_uid = get_sec_uid(home_url)
         sys.stderr.write(f'[init] sec_uid: {sec_uid}\n')
@@ -365,7 +389,7 @@ def init_one(label: str, home_url: str, save_dir: str):
         emit({'type': 'error', 'code': 'sec_uid_failed', 'label': label, 'message': str(e)})
         return
 
-    # 2. 获取用户资料
+    # 3. 获取用户资料
     try:
         nickname, signature, ip_location = get_user_profile(sec_uid)
         sys.stderr.write(f'[init] 用户: {nickname} ({ip_location})\n')
@@ -375,13 +399,13 @@ def init_one(label: str, home_url: str, save_dir: str):
 
     save_profile(home_url, nickname, signature, ip_location, sec_uid)
 
-    # 3. 全量抓取视频列表
+    # 4. 全量抓取视频列表
     sys.stderr.write(f'[init] 开始全量抓取视频列表...\n')
     all_items = fetch_all_videos(sec_uid)
     total_count = len(all_items)
     sys.stderr.write(f'[init] 共获取到 {total_count} 条视频\n')
 
-    # 4. 解析视频列表，写入历史记录，保存目录缓存
+    # 5. 解析视频列表，写入历史记录，保存目录缓存
     user_dir = os.path.join(save_dir, nickname)
     os.makedirs(user_dir, exist_ok=True)
 
@@ -397,7 +421,7 @@ def init_one(label: str, home_url: str, save_dir: str):
     # 保存目录缓存（不含 video_url，因为会过期）
     save_catalog(home_url, video_list)
 
-    # 5. 输出 init_complete 事件
+    # 6. 输出 init_complete 事件
     display_list = [
         {
             'aweme_id': v['aweme_id'],
@@ -420,6 +444,7 @@ def init_one(label: str, home_url: str, save_dir: str):
         'save_dir': user_dir,
         'total_videos': total_count,
         'video_list': display_list,
+        'login_warning': not is_logged_in,
         'message': (
             f'{label}（{nickname}）初始化完成：'
             f'共 {total_count} 条视频已记录，视频目录已缓存。'

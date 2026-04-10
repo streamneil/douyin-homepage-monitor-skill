@@ -105,19 +105,17 @@ Skill 会自动识别意图：
 2. 设置监控频率（推荐 5~30 分钟）
 3. 设置视频保存路径（默认 `./Download`）
 
-### 配置 Cookie（可选）
+### 配置 Cookie（必须）
 
-参考 [jiji262/douyin-downloader](https://github.com/jiji262/douyin-downloader) 的策略，使用设备标识 Cookie 即可，**无需登录**。`ttwid` 和 `msToken` 会在运行时自动动态获取，`COOKIE` 变量留空也可正常运行。
+> 抖音 API 需要完整的登录态 Cookie 才能获取用户完整视频列表（超过约 20 条）。
 
-如需补充设备 Cookie 以提高稳定性（可选）：
-
-1. 在浏览器打开 [https://www.douyin.com](https://www.douyin.com)（无需登录）
+1. 在浏览器打开 [https://www.douyin.com](https://www.douyin.com) 并**登录**
 2. 按 `F12` → Network 标签 → 刷新页面
 3. 点击任意请求 → Request Headers → 找到 `cookie` 字段
-4. 复制 cookie 值（脚本会自动过滤掉登录态字段，只保留设备标识字段）
+4. 复制完整的 cookie 值（是很长的一串字符串，需含 `sessionid`、`uid_tt` 等字段）
 5. 编辑插件目录下的 `scripts/monitor.py`，将 `COOKIE` 变量（约第 25 行）替换为复制的值
 
-> 注意：请勿将 `sessionid`、`uid_tt` 等登录态字段填入，这些字段不被使用。
+`ttwid` 和 `msToken` 会在运行时自动动态获取并覆盖 Cookie 中的旧值，Cookie 失效后（通常数月）重复上述步骤更新即可。
 
 ### 安装 Python 依赖
 
