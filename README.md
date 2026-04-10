@@ -9,11 +9,33 @@
 - **定时自动监控**：通过 `/schedule` 创建定时任务，无需手动触发
 - **多 channel 支持**：自动适配 iMessage、Telegram、Discord 等已配置的 channel
 
-## 命令
+## 使用方式
+
+### 方式一：自然语言对话（推荐）
+
+安装后，直接在对话中描述需求，无需记忆命令：
+
+```
+帮我监控周星星的抖音主页：https://v.douyin.com/yyyy，5分钟检测一次
+```
+
+```
+再加一个：刘德华 https://v.douyin.com/xxxx
+```
+
+```
+帮我检测一下现在有没有新视频
+```
+
+Skill 会自动识别意图：
+- 消息中包含抖音链接 → **配置模式**：追加监控目标、设置频率、创建定时任务
+- 要求立即检测 → **执行模式**：运行监控并发送通知
+
+### 方式二：命令
 
 | 命令 | 说明 |
 |------|------|
-| `/douyin-homepage-monitor:setup` | 初始化配置，引导填写监控目标和频率，自动创建定时任务 |
+| `/douyin-homepage-monitor:setup` | 引导式配置，适合首次使用 |
 | `/douyin-homepage-monitor:monitor` | 立即执行一次检测 |
 | `/douyin-homepage-monitor:status` | 查看监控状态、目标列表、历史记录数量 |
 | `/douyin-homepage-monitor:pause` | 暂停监控 |

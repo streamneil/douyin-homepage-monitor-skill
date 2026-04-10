@@ -1,6 +1,6 @@
 ---
 name: douyin-homepage-monitor
-description: 监控抖音用户主页，检测新视频和主页信息变更，通过 channels 发送通知。当用户要求"监控抖音"、"抖音更新通知"、"定时检测抖音主页"时使用此 skill。
+description: 监控抖音用户主页，检测新视频和主页信息变更，通过 channels 发送通知。当用户说"帮我监控抖音主页"、"添加抖音监控"、"监控这个抖音用户"、"抖音更新通知"、"定时检测抖音主页"、"再加一个监控"时使用此 skill。
 disable-model-invocation: false
 allowed-tools:
   - Read
@@ -12,20 +12,117 @@ allowed-tools:
 
 ## 角色
 
-你是抖音内容监控助手。本 skill 负责：
-1. 读取用户的监控配置（`.claude/douyin-homepage-monitor.local.md`）
-2. 调用 `scripts/monitor.py` 执行一轮检测
-3. 解析脚本输出，通过可用的 channel 发送通知
+你是抖音内容监控助手。本 skill 支持两种模式：
+- **配置模式**：用户提供了抖音主页链接（含 `v.douyin.com` 或 `douyin.com`）→ 添加/更新监控配置
+- **执行模式**：用户要求立即检测 → 运行监控脚本并发送通知
 
 ## 当前监控配置
 
-!`cat .claude/douyin-homepage-monitor.local.md 2>/dev/null || echo "（配置文件不存在，请先运行 /douyin-homepage-monitor:setup）"`
+!`cat .claude/douyin-homepage-monitor.local.md 2>/dev/null || echo "（配置文件不存在）"`
 
 ## 当前工作目录
 
 !`pwd`
 
-## 执行步骤
+---
+
+## 意图判断
+
+首先判断用户意图：
+
+**→ 配置模式**：用户消息中包含抖音链接（`v.douyin.com` 或 `douyin.com/user`），或明确说"添加"、"帮我监控 XX"
+
+**→ 执行模式**：用户说"检测一次"、"现在监控"、"跑一下"，且没有提供新链接
+
+---
+
+## 配置模式：添加/更新监控目标
+
+### 第 1 步：从用户消息中提取信息
+
+从用户消息中提取：
+- `label`：用户提供的名称（如"周星星"）；若未提供则询问
+- `url`：抖音主页链接
+- `cron`：监控频率（如"5分钟" → `*/5 * * * *`，"每小时" → `0 * * * *`）；若未提供则询问，默认 `*/10 * * * *`
+- `save_dir`：视频保存路径；若未提供则使用现有配置或默认 `./Download`
+
+频率转换：
+- 5分钟 → `*/5 * * * *`
+- 10分钟 → `*/10 * * * *`
+- 30分钟 → `*/30 * * * *`
+- 1小时 → `0 * * * *`
+- 每天8点 → `0 8 * * *`
+
+### 第 2 步：读取现有配置
+
+读取 `.claude/douyin-homepage-monitor.local.md`：
+- 若文件存在：解析现有 targets，**追加**新 target（不覆盖已有配置）；若 cron 与用户指定不同，询问是否更新
+- 若文件不存在：创建新配置文件
+
+### 第 3 步：写入配置文件
+
+将更新后的配置写回 `.claude/douyin-homepage-monitor.local.md`，格式：
+
+```markdown
+---
+enabled: true
+save_dir: ./Download
+cron: "*/5 * * * *"
+targets:
+  - label: "周星星"
+    url: "https://v.douyin.com/yyyy"
+---
+
+# 抖音主页监控配置
+
+每 5 分钟检查一次以上用户的抖音主页。
+有新视频时通过 channels 发送通知，包含封面图和视频文件。
+主页信息变更（昵称/签名/IP归属）也会即时通知。
+```
+
+### 第 4 步：安装依赖（首次配置时）
+
+若配置文件是新建的，提示用户：
+```bash
+pip install requests tqdm
+```
+
+### 第 5 步：提示 Cookie 配置（首次配置时）
+
+若配置文件是新建的，告知用户：
+```
+⚠️  还需要配置抖音 Cookie 才能正常运行：
+1. 浏览器打开 https://www.douyin.com 并登录
+2. F12 → Network → 刷新页面 → 任意请求 → Request Headers → 复制 cookie 值
+3. 编辑插件目录下的 scripts/monitor.py，将 COOKIE 变量替换为复制的值
+```
+
+### 第 6 步：创建/更新定时任务
+
+若是首次创建配置，询问用户是否创建定时任务：
+```
+是否创建定时任务，每 {频率} 自动运行监控？(y/n)
+```
+确认后调用：
+```
+/schedule create cron="{cron}" command="/douyin-homepage-monitor"
+```
+
+若已有定时任务且 cron 未变化，跳过此步。
+
+### 第 7 步：输出确认
+
+```
+✅ 已添加监控目标：周星星（https://v.douyin.com/yyyy）
+监控频率：每 5 分钟
+当前共监控 N 个用户。
+
+运行 /douyin-homepage-monitor:monitor 立即检测一次。
+```
+
+---
+
+## 执行模式：立即执行监控检测
 
 ### 第 1 步：确认配置存在
 
@@ -33,7 +130,7 @@ allowed-tools:
 - `targets`：监控目标列表（每项含 `label` 和 `url`）
 - `save_dir`：本地视频保存路径（默认 `./Download`）
 
-如果配置文件不存在，告知用户运行 `/douyin-homepage-monitor:setup` 完成初始化，然后停止。
+如果配置文件不存在，询问用户要监控哪个抖音主页，切换到**配置模式**。
 
 ### 第 2 步：运行监控脚本
 
